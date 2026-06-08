@@ -1,0 +1,10 @@
+npx nest g module common
+npx nest g module auth
+npx nest g module users
+npx nest g module tenants
+npx nest g module tables
+npx nest g module inventory
+npx nest g module orders
+npx nest g module attendance
+npx nest g module chat
+npx nest g module reports

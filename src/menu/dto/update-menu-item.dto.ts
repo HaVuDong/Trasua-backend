@@ -1,0 +1,12 @@
+import { ItemCategory } from '../../inventory/schemas/inventory.schema';
+import { ManualAvailabilityOverride, MenuItemStatus } from '../schemas/menu-item.schema';
+
+export class UpdateMenuItemDto {
+  name?: string;
+  category?: ItemCategory;
+  description?: string;
+  sellingPrice?: number;
+  imageUrl?: string;
+  status?: MenuItemStatus;
+  manualAvailabilityOverride?: ManualAvailabilityOverride;
+}
