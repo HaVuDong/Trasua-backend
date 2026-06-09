@@ -1,6 +1,29 @@
 version: '3.8'
 
 services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trasua_backend
+    env_file:
+      - .env
+    environment:
+      PORT: 3000
+      MONGODB_URI: mongodb://admin:password@mongodb:27017/trasua?authSource=admin
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      S3_ENDPOINT: minio
+      S3_PORT: 9000
+      S3_USE_SSL: "false"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - mongodb
+      - redis
+      - minio
+    restart: unless-stopped
+
   mongodb:
     image: mongo:latest
     container_name: trasua_mongodb
