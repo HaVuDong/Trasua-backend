@@ -19,6 +19,17 @@ export class EmailService {
     return this.configService.get<string>('NODE_ENV') === 'production' || process.env.NODE_ENV === 'production';
   }
 
+  private isDeviceOtpDisabled() {
+    return (
+      this.configService.get<string>('DISABLE_DEVICE_OTP') === 'true' ||
+      this.configService.get<string>('AUTH_DISABLE_DEVICE_OTP') === 'true'
+    );
+  }
+
+  shouldSkipDeviceOtp() {
+    return this.isDeviceOtpDisabled();
+  }
+
   async sendDeviceOtp(email: string, otp: string, name?: string): Promise<{ delivered: boolean; devOtp?: string }> {
     if (!email) {
       throw new ServiceUnavailableException('Tai khoan chua co email de nhan OTP');
@@ -38,6 +49,9 @@ export class EmailService {
       host: this.configService.get<string>('SMTP_HOST'),
       port,
       secure: port === 465,
+      connectionTimeout: Number(this.configService.get<string>('SMTP_CONNECTION_TIMEOUT_MS') || 5000),
+      greetingTimeout: Number(this.configService.get<string>('SMTP_GREETING_TIMEOUT_MS') || 5000),
+      socketTimeout: Number(this.configService.get<string>('SMTP_SOCKET_TIMEOUT_MS') || 8000),
       auth: {
         user: this.configService.get<string>('SMTP_USER'),
         pass: this.configService.get<string>('SMTP_PASS'),

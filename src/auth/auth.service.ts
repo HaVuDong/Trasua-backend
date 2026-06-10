@@ -192,6 +192,11 @@ export class AuthService {
     const deviceExists = userDoc.trustedDevices.some(d => d.deviceId === deviceId);
 
     if (!deviceExists) {
+      if (this.emailService.shouldSkipDeviceOtp()) {
+        await this.upsertTrustedDevice(userDoc, deviceId, userAgent, ip);
+        return this.buildLoginResponse(userDoc);
+      }
+
       // First login or new device: generate OTP and send it to the account email.
       const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
       userDoc.localOtpCode = otp;

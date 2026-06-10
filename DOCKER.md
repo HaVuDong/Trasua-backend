@@ -37,6 +37,16 @@ USE_REDIS_MOCK=false
 
 Payroll calculation will run synchronously instead of through BullMQ.
 
+## Render without SMTP OTP
+
+If login hangs after the password is accepted, SMTP is probably blocked or not configured. For a demo deployment, disable new-device OTP:
+
+```bash
+DISABLE_DEVICE_OTP=true
+```
+
+For production, keep OTP enabled and configure an SMTP provider that supports Render-compatible outbound ports such as `2525`.
+
 ## Local Redis mock
 
 Only use this when developing locally without Redis:

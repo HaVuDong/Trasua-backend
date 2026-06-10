@@ -66,6 +66,7 @@ describe('AuthService', () => {
       log: jest.fn().mockResolvedValue(undefined),
     };
     emailService = {
+      shouldSkipDeviceOtp: jest.fn().mockReturnValue(false),
       sendDeviceOtp: jest.fn().mockResolvedValue({ delivered: false, devOtp: '123456' }),
     };
     service = new AuthService(userModel, jwtService, auditLogService, emailService);
@@ -134,6 +135,33 @@ describe('AuthService', () => {
     expect(userDoc.localOtpCode).toMatch(/^\d{6}$/);
     expect(userDoc.localOtpExpires).toBeInstanceOf(Date);
     expect(emailService.sendDeviceOtp).toHaveBeenCalledWith(userDoc.email, expect.stringMatching(/^\d{6}$/), undefined);
+  });
+
+  it('trusts new device immediately when device OTP is disabled', async () => {
+    emailService.shouldSkipDeviceOtp.mockReturnValue(true);
+    const userDoc = buildUserDoc({
+      role: Role.USER,
+      trustedDevices: [],
+    });
+    userModel.findById.mockReturnValue({
+      exec: jest.fn().mockResolvedValue(userDoc),
+    });
+
+    const result = await service.checkDeviceAndLogin(
+      { _id: userDoc._id.toString() },
+      'new-device',
+      'test-agent',
+      '2.2.2.2',
+    );
+
+    expect(result.access_token).toBe('signed-token');
+    expect(emailService.sendDeviceOtp).not.toHaveBeenCalled();
+    expect(userDoc.trustedDevices).toHaveLength(1);
+    expect(userDoc.trustedDevices[0]).toMatchObject({
+      deviceId: 'new-device',
+      userAgent: 'test-agent',
+      ip: '2.2.2.2',
+    });
   });
 
   it('requires OTP for first login device', async () => {
