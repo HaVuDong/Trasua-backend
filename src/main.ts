@@ -1,9 +1,15 @@
-import './mock-redis';
-import { NestFactory } from '@nestjs/core';
-import { AppModule } from './app.module';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-
 async function bootstrap() {
+  const shouldUseRedisMock = process.env.USE_REDIS_MOCK === 'true' && process.env.NODE_ENV !== 'production';
+  if (shouldUseRedisMock) {
+    await import('./mock-redis.js');
+  } else if (process.env.USE_REDIS_MOCK === 'true') {
+    console.warn('USE_REDIS_MOCK is ignored in production. Configure a real Redis service instead.');
+  }
+
+  const { NestFactory } = await import('@nestjs/core');
+  const { AppModule } = await import('./app.module.js');
+  const { DocumentBuilder, SwaggerModule } = await import('@nestjs/swagger');
+
   const app = await NestFactory.create(AppModule);
 
   // Enable CORS
