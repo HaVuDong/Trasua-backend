@@ -16,7 +16,7 @@ Create a real `.env` from `.env.example`, then run:
 docker run --env-file .env -p 3000:3000 trasua-backend
 ```
 
-For production deploys, configure a real Redis service with either `REDIS_URL` or `REDIS_HOST`/`REDIS_PORT`. Do not enable `USE_REDIS_MOCK` in production.
+For production deploys, either configure a real Redis service with `REDIS_URL`, or disable the payroll queue with `DISABLE_REDIS_QUEUE=true`. Do not enable `USE_REDIS_MOCK` in production.
 
 ## Run backend with local infrastructure
 
@@ -25,6 +25,17 @@ docker compose up --build
 ```
 
 This starts the API, MongoDB, Redis, and MinIO. Replace all sample secrets before production deployment.
+
+## Render without Redis
+
+If you do not have a Redis URL yet, set this environment variable on Render:
+
+```bash
+DISABLE_REDIS_QUEUE=true
+USE_REDIS_MOCK=false
+```
+
+Payroll calculation will run synchronously instead of through BullMQ.
 
 ## Local Redis mock
 

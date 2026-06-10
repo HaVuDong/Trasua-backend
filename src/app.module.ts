@@ -16,6 +16,10 @@ import { ChatModule } from './chat/chat.module';
 import { ReportsModule } from './reports/reports.module';
 import { MenuModule } from './menu/menu.module';
 
+function isRedisQueueDisabled() {
+  return process.env.DISABLE_REDIS_QUEUE === 'true' || process.env.REDIS_DISABLED === 'true';
+}
+
 function toBoolean(value?: string | boolean) {
   if (typeof value === 'boolean') return value;
   return value === 'true' || value === '1';
@@ -64,13 +68,19 @@ function getRedisConnectionOptions(configService: ConfigService) {
       }),
       inject: [ConfigService],
     }),
-    BullModule.forRootAsync({
-      imports: [ConfigModule],
-      useFactory: async (configService: ConfigService) => ({
-        connection: getRedisConnectionOptions(configService),
-      }),
-      inject: [ConfigService],
-    }),
+    ...(
+      isRedisQueueDisabled()
+        ? []
+        : [
+            BullModule.forRootAsync({
+              imports: [ConfigModule],
+              useFactory: async (configService: ConfigService) => ({
+                connection: getRedisConnectionOptions(configService),
+              }),
+              inject: [ConfigService],
+            }),
+          ]
+    ),
     CommonModule,
     AuthModule,
     UsersModule,

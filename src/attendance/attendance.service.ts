@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Optional } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Attendance, AttendanceDocument, AttendanceStatus } from './schemas/attendance.schema';
@@ -41,7 +41,7 @@ export class AttendanceService {
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectModel(Tenant.name) private tenantModel: Model<TenantDocument>,
     private auditLogService: AuditLogService,
-    @InjectQueue('payroll-queue') private payrollQueue: Queue,
+    @Optional() @InjectQueue('payroll-queue') private payrollQueue?: Queue,
   ) {}
 
   private normalizeRequiredStaff(requiredStaffByRole: any) {
@@ -990,6 +990,15 @@ export class AttendanceService {
   }
 
   async queuePayrollCalculation(tenantId: string, month: string): Promise<any> {
+    if (!this.payrollQueue) {
+      await this.calculatePayrollDirect(tenantId, month);
+      return {
+        jobId: 'sync_job_' + Date.now(),
+        status: 'COMPLETED',
+        message: `Payroll calculated synchronously because Redis queue is disabled`,
+      };
+    }
+
     try {
       const job = await this.payrollQueue.add('calculate-payroll', { tenantId, month });
       await this.calculatePayrollDirect(tenantId, month);

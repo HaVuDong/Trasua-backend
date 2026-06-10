@@ -12,6 +12,10 @@ import { User, UserSchema } from '../users/schemas/user.schema';
 import { Tenant, TenantSchema } from '../tenants/schemas/tenant.schema';
 import { PayrollProcessor } from './payroll.processor';
 
+function isRedisQueueDisabled() {
+  return process.env.DISABLE_REDIS_QUEUE === 'true' || process.env.REDIS_DISABLED === 'true';
+}
+
 @Module({
   imports: [
     MongooseModule.forFeature([
@@ -23,12 +27,10 @@ import { PayrollProcessor } from './payroll.processor';
       { name: User.name, schema: UserSchema },
       { name: Tenant.name, schema: TenantSchema },
     ]),
-    BullModule.registerQueue({
-      name: 'payroll-queue',
-    }),
+    ...(isRedisQueueDisabled() ? [] : [BullModule.registerQueue({ name: 'payroll-queue' })]),
   ],
   controllers: [AttendanceController],
-  providers: [AttendanceService, PayrollProcessor],
+  providers: [AttendanceService, ...(isRedisQueueDisabled() ? [] : [PayrollProcessor])],
   exports: [AttendanceService],
 })
 export class AttendanceModule {}
