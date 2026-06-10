@@ -37,15 +37,31 @@ USE_REDIS_MOCK=false
 
 Payroll calculation will run synchronously instead of through BullMQ.
 
-## Render without SMTP OTP
+## Render: OTP Email (Resend API — recommended)
 
-If login hangs after the password is accepted, SMTP is probably blocked or not configured. For a demo deployment, disable new-device OTP:
+Render blocks outbound SMTP ports (587, 465). Use **Resend API** which sends via HTTPS (port 443):
+
+1. Sign up at [resend.com](https://resend.com) (free: 100 emails/day)
+2. Get your API key from Settings → API Keys
+3. Set these environment variables on Render:
+
+```bash
+RESEND_API_KEY=re_xxxxxxxxxxxx
+RESEND_FROM=onboarding@resend.dev
+DISABLE_DEVICE_OTP=false
+```
+
+> With the free plan, emails are sent from `onboarding@resend.dev`. To use a custom sender, verify your domain on Resend.
+
+## Render: Disable OTP (demo only)
+
+If you just need a quick demo without email OTP:
 
 ```bash
 DISABLE_DEVICE_OTP=true
 ```
 
-For production, keep OTP enabled and configure an SMTP provider that supports Render-compatible outbound ports such as `2525`.
+For production, always keep OTP enabled with Resend API configured.
 
 ## Local Redis mock
 
