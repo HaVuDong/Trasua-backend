@@ -54,6 +54,8 @@ describe('OrdersService public QR APIs', () => {
       {} as never,
       tableSessionModel as never,
       {} as never,
+      {} as never,
+      {} as never,
       menuService as never,
       {} as never,
     );

@@ -1,8 +1,11 @@
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import { createHmac } from 'crypto';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
 import { Order, OrderDocument, OrderStatus, OrderItemStatus } from './schemas/order.schema';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { CreateCustomerRequestDto } from './dto/customer-request.dto';
+import { CreatePayosPaymentDto } from './dto/create-payos-payment.dto';
 import { Table, TableDocument, TableStatus } from '../tables/schemas/table.schema';
 import { InventoryItem, InventoryItemDocument, ItemStatus } from '../inventory/schemas/inventory.schema';
 import { InventoryService } from '../inventory/inventory.service';
@@ -17,6 +20,18 @@ import {
   MenuRecipeStatus,
 } from '../menu/schemas/menu-item-recipe.schema';
 import { TableSession, TableSessionDocument, TableSessionStatus } from './schemas/table-session.schema';
+import {
+  CustomerPaymentMethod,
+  CustomerRequest,
+  CustomerRequestDocument,
+  CustomerRequestType,
+} from './schemas/customer-request.schema';
+import {
+  CustomerPayment,
+  CustomerPaymentDocument,
+  CustomerPaymentProvider,
+  CustomerPaymentStatus,
+} from './schemas/customer-payment.schema';
 
 type NormalizedOrderInputItem = {
   requestedId: string;
@@ -75,6 +90,8 @@ export class OrdersService {
     @InjectModel(MenuItem.name) private menuItemModel: Model<MenuItemDocument>,
     @InjectModel(MenuItemRecipe.name) private menuRecipeModel: Model<MenuItemRecipeDocument>,
     @InjectModel(TableSession.name) private tableSessionModel: Model<TableSessionDocument>,
+    @InjectModel(CustomerRequest.name) private customerRequestModel: Model<CustomerRequestDocument>,
+    @InjectModel(CustomerPayment.name) private customerPaymentModel: Model<CustomerPaymentDocument>,
     private inventoryService: InventoryService,
     private menuService: MenuService,
     private chatGateway: ChatGateway,
@@ -266,6 +283,174 @@ export class OrdersService {
     }).exec();
     if (!order) throw new NotFoundException('Order not found');
     return { status: order.status };
+  }
+
+  async getTableSessionSummary(tenantId: string, sessionId: string) {
+    const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Table session not found');
+    const sessionObjectId = this.toObjectId(sessionId, 'Invalid table session');
+    return this.buildTableSessionSummary(tenantObjectId, sessionObjectId);
+  }
+
+  async createCustomerRequest(tenantId: string, qrToken: string, dto: CreateCustomerRequestDto) {
+    const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Invalid or expired QR code');
+    const requestType = dto?.type;
+    if (!Object.values(CustomerRequestType).includes(requestType)) {
+      throw new BadRequestException('Invalid customer request type');
+    }
+
+    const table = await this.tableModel.findOne({
+      tenantId: tenantObjectId,
+      qrCodeToken: qrToken,
+    }).exec();
+
+    if (!table) throw new NotFoundException('Invalid or expired QR code');
+    if (table.isHidden) throw new BadRequestException('This table is currently unavailable');
+
+    const sessionObjectId = this.toObjectId(dto.sessionId, 'Invalid table session');
+    const tableSession = await this.tableSessionModel.findOne({
+      _id: sessionObjectId,
+      tenantId: tenantObjectId,
+      tableId: table._id,
+      status: TableSessionStatus.OPEN,
+    }).exec();
+
+    if (!tableSession) {
+      throw new BadRequestException('Invalid or expired table session');
+    }
+
+    if (dto.customerName || dto.customerPhone) {
+      tableSession.customerName = dto.customerName || tableSession.customerName;
+      tableSession.customerPhone = dto.customerPhone || tableSession.customerPhone;
+      tableSession.lastActivityAt = new Date();
+      await tableSession.save();
+    }
+
+    const summary = await this.buildTableSessionSummary(tenantObjectId, sessionObjectId);
+    const paymentMethod = this.getRequestPaymentMethod(requestType, dto.paymentMethod);
+    let payment: any = null;
+
+    if (requestType === CustomerRequestType.PRINT_BILL) {
+      payment = await this.ensurePayosPaymentForSession(tenantObjectId, tableSession, summary);
+    }
+
+    const customerRequest = new this.customerRequestModel({
+      tenantId: tenantObjectId,
+      tableId: table._id,
+      sessionId: tableSession._id,
+      type: requestType,
+      paymentMethod,
+      message: dto.message?.trim() || undefined,
+      customerName: tableSession.customerName,
+      customerPhone: tableSession.customerPhone,
+      tableNameSnapshot: table.name,
+      qrTokenSnapshot: qrToken,
+      paymentId: payment?.paymentId ? new Types.ObjectId(payment.paymentId) : undefined,
+      billSnapshot: summary.bill,
+    });
+
+    const savedRequest = await customerRequest.save();
+    const payload = {
+      _id: savedRequest._id.toString(),
+      type: savedRequest.type,
+      status: savedRequest.status,
+      paymentMethod: savedRequest.paymentMethod,
+      message: savedRequest.message,
+      tenantId,
+      tableId: table._id.toString(),
+      tableName: table.name,
+      sessionId: tableSession._id.toString(),
+      customerName: tableSession.customerName,
+      customerPhone: tableSession.customerPhone,
+      bill: summary.bill,
+      payment,
+      createdAt: (savedRequest as any).createdAt,
+    };
+
+    this.chatGateway.sendOrderEvent(tenantId, 'customerRequest', payload);
+    return payload;
+  }
+
+  async createPayosPayment(tenantId: string, dto: CreatePayosPaymentDto) {
+    const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Table session not found');
+    const sessionObjectId = this.toObjectId(dto.sessionId, 'Invalid table session');
+    const tableSession = await this.tableSessionModel.findOne({
+      _id: sessionObjectId,
+      tenantId: tenantObjectId,
+      status: TableSessionStatus.OPEN,
+    }).exec();
+
+    if (!tableSession) {
+      throw new BadRequestException('Invalid or expired table session');
+    }
+
+    if (dto.customerName || dto.customerPhone) {
+      tableSession.customerName = dto.customerName || tableSession.customerName;
+      tableSession.customerPhone = dto.customerPhone || tableSession.customerPhone;
+      tableSession.lastActivityAt = new Date();
+      await tableSession.save();
+    }
+
+    const summary = await this.buildTableSessionSummary(tenantObjectId, sessionObjectId);
+    return this.ensurePayosPaymentForSession(tenantObjectId, tableSession, summary);
+  }
+
+  async getCustomerPaymentStatus(paymentId: string) {
+    const paymentObjectId = this.toObjectId(paymentId, 'Payment not found');
+    const payment = await this.customerPaymentModel.findById(paymentObjectId).exec();
+    if (!payment) throw new NotFoundException('Payment not found');
+    return this.toPublicPaymentResponse(payment);
+  }
+
+  async handlePayosWebhook(body: Record<string, unknown>) {
+    const data = this.asRecord(body?.data);
+    const receivedSignature = typeof body?.signature === 'string' ? body.signature : '';
+    const checksumKey = process.env.PAYOS_CHECKSUM_KEY;
+
+    if (!checksumKey || !receivedSignature) {
+      throw new BadRequestException('Invalid payOS webhook signature');
+    }
+
+    const expectedSignature = this.createPayosSignature(data, checksumKey);
+    if (expectedSignature !== receivedSignature) {
+      throw new BadRequestException('Invalid payOS webhook signature');
+    }
+
+    const orderCode = Number(data.orderCode);
+    if (!Number.isFinite(orderCode)) {
+      throw new BadRequestException('Invalid payOS order code');
+    }
+
+    const payment = await this.customerPaymentModel.findOne({ orderCode }).exec();
+    if (!payment) {
+      return { success: true };
+    }
+
+    payment.webhookPayload = body;
+    const webhookCode = String(data.code || body.code || '');
+    const isPaid = body.success === true || webhookCode === '00';
+    const isCancelled = data.cancel === true || String(data.status || '').toUpperCase() === 'CANCELLED';
+
+    if (isPaid) {
+      payment.status = CustomerPaymentStatus.PAID;
+      payment.paidAt = new Date();
+    } else if (isCancelled) {
+      payment.status = CustomerPaymentStatus.CANCELLED;
+    }
+
+    const savedPayment = await payment.save();
+    if (savedPayment.status === CustomerPaymentStatus.PAID) {
+      this.chatGateway.sendOrderEvent(savedPayment.tenantId.toString(), 'paymentPaid', {
+        ...this.toPublicPaymentResponse(savedPayment),
+        tableId: savedPayment.tableId.toString(),
+        tableName: savedPayment.tableNameSnapshot,
+        sessionId: savedPayment.sessionId.toString(),
+        customerName: savedPayment.customerName,
+        customerPhone: savedPayment.customerPhone,
+        bill: savedPayment.billSnapshot,
+      });
+    }
+
+    return { success: true };
   }
 
   async createQrOrder(tenantId: string, qrToken: string, dto: CreateOrderDto): Promise<Order> {
@@ -716,13 +901,17 @@ export class OrdersService {
       tenantId: new Types.ObjectId(tenantId),
       tableId: new Types.ObjectId(tableId),
       status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
-    }).exec();
+    })
+      .populate('items.itemId', 'name category imageUrl sellingPrice status')
+      .exec();
 
     const allItems = orders.flatMap((o: any) =>
       o.items
         .filter((i: any) => i.status !== OrderItemStatus.CANCELLED && !i.isFree)
         .map((i: any) => ({
-          itemId: i.itemId,
+          itemId: this.getOrderItemMenuId(i),
+          orderItemId: i._id?.toString(),
+          name: this.getOrderItemName(i),
           quantity: i.quantity,
           price: i.price,
           subtotal: i.quantity * i.price,
@@ -739,6 +928,325 @@ export class OrdersService {
       items: allItems,
       subtotal,
     };
+  }
+
+  private toObjectId(value: string | Types.ObjectId | undefined, message: string): Types.ObjectId {
+    if (value instanceof Types.ObjectId) return value;
+    if (!value || !Types.ObjectId.isValid(value)) {
+      throw new BadRequestException(message);
+    }
+    return new Types.ObjectId(value);
+  }
+
+  private async buildTableSessionSummary(tenantObjectId: Types.ObjectId, sessionObjectId: Types.ObjectId) {
+    const tableSession = await this.tableSessionModel.findOne({
+      _id: sessionObjectId,
+      tenantId: tenantObjectId,
+    }).exec();
+
+    if (!tableSession) {
+      throw new NotFoundException('Table session not found');
+    }
+
+    const table = await this.tableModel.findOne({
+      _id: tableSession.tableId,
+      tenantId: tenantObjectId,
+    }).exec();
+
+    if (!table) {
+      throw new NotFoundException('Table not found');
+    }
+
+    const orders = await this.orderModel.find({
+      tenantId: tenantObjectId,
+      sessionId: sessionObjectId,
+      status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+    })
+      .populate('items.itemId', 'name category imageUrl sellingPrice status')
+      .sort({ createdAt: -1 })
+      .exec();
+
+    const publicOrders = orders.map((order) => this.toPublicSessionOrder(order));
+    const billItems = publicOrders.flatMap((order: any) =>
+      order.items
+        .filter((item: any) => item.status !== OrderItemStatus.CANCELLED && !item.isFree)
+        .map((item: any) => ({
+          ...item,
+          orderId: order._id,
+          orderCode: order._id.slice(-6).toUpperCase(),
+        })),
+    );
+    const subtotal = billItems.reduce((sum, item) => sum + item.subtotal, 0);
+    const totalQuantity = billItems.reduce((sum, item) => sum + item.quantity, 0);
+
+    return {
+      table: {
+        _id: (table._id as Types.ObjectId).toString(),
+        name: table.name,
+        status: table.status,
+      },
+      session: {
+        _id: (tableSession._id as Types.ObjectId).toString(),
+        status: tableSession.status,
+        openedAt: tableSession.openedAt,
+        lastActivityAt: tableSession.lastActivityAt,
+      },
+      customer: {
+        name: tableSession.customerName || '',
+        phone: tableSession.customerPhone || '',
+      },
+      orders: publicOrders,
+      bill: {
+        orderCount: publicOrders.length,
+        itemCount: billItems.length,
+        totalQuantity,
+        subtotal,
+        finalAmount: subtotal,
+        items: billItems,
+      },
+    };
+  }
+
+  private toPublicSessionOrder(order: any) {
+    const items = (order.items || []).map((item: any) => {
+      const quantity = Number(item.quantity || 0);
+      const price = Number(item.price || 0);
+      const isFree = Boolean(item.isFree);
+
+      return {
+        _id: item._id?.toString() || this.getOrderItemMenuId(item),
+        itemId: this.getOrderItemMenuId(item),
+        name: this.getOrderItemName(item),
+        category: this.getOrderItemCategory(item),
+        quantity,
+        price,
+        note: item.note,
+        status: item.status,
+        isFree,
+        subtotal: isFree || item.status === OrderItemStatus.CANCELLED ? 0 : quantity * price,
+      };
+    });
+
+    return {
+      _id: order._id.toString(),
+      status: order.status,
+      totalAmount: order.totalAmount,
+      finalAmount: order.finalAmount,
+      customer: order.customer,
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt,
+      items,
+    };
+  }
+
+  private getOrderItemMenuId(item: any): string {
+    const itemRef = item?.itemId;
+    if (itemRef && typeof itemRef === 'object' && itemRef._id) {
+      return itemRef._id.toString();
+    }
+    return itemRef?.toString?.() || '';
+  }
+
+  private getOrderItemName(item: any): string {
+    const itemRef = item?.itemId;
+    if (itemRef && typeof itemRef === 'object' && itemRef.name) {
+      return itemRef.name;
+    }
+    return item?.menuItemNameSnapshot || 'Mon';
+  }
+
+  private getOrderItemCategory(item: any): string | undefined {
+    const itemRef = item?.itemId;
+    if (itemRef && typeof itemRef === 'object' && itemRef.category) {
+      return itemRef.category;
+    }
+    return undefined;
+  }
+
+  private getRequestPaymentMethod(
+    type: CustomerRequestType,
+    requestedMethod?: CustomerPaymentMethod,
+  ): CustomerPaymentMethod | undefined {
+    if (requestedMethod && Object.values(CustomerPaymentMethod).includes(requestedMethod)) {
+      return requestedMethod;
+    }
+    if (type === CustomerRequestType.PAY_CASH) return CustomerPaymentMethod.CASH;
+    if (type === CustomerRequestType.PAY_TRANSFER || type === CustomerRequestType.PRINT_BILL) {
+      return CustomerPaymentMethod.TRANSFER;
+    }
+    return undefined;
+  }
+
+  private async ensurePayosPaymentForSession(
+    tenantObjectId: Types.ObjectId,
+    tableSession: TableSessionDocument,
+    summary: any,
+  ) {
+    const amount = Number(summary?.bill?.finalAmount || summary?.bill?.subtotal || 0);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException('No active bill to pay');
+    }
+
+    const existingPayment = await this.customerPaymentModel.findOne({
+      tenantId: tenantObjectId,
+      sessionId: tableSession._id,
+      provider: CustomerPaymentProvider.PAYOS,
+      status: { $in: [CustomerPaymentStatus.PENDING, CustomerPaymentStatus.PAID] },
+      amount,
+    })
+      .sort({ createdAt: -1 })
+      .exec();
+
+    if (existingPayment) {
+      return this.toPublicPaymentResponse(existingPayment);
+    }
+
+    this.assertPayosConfigured();
+
+    const orderCode = await this.generateUniquePayosOrderCode();
+    const description = this.buildPayosDescription((tableSession._id as Types.ObjectId).toString());
+    const payment = new this.customerPaymentModel({
+      tenantId: tenantObjectId,
+      tableId: tableSession.tableId,
+      sessionId: tableSession._id,
+      provider: CustomerPaymentProvider.PAYOS,
+      status: CustomerPaymentStatus.PENDING,
+      orderCode,
+      amount,
+      description,
+      customerName: summary.customer?.name,
+      customerPhone: summary.customer?.phone,
+      tableNameSnapshot: summary.table?.name,
+      billSnapshot: summary.bill,
+    });
+
+    const savedPayment = await payment.save();
+
+    try {
+      const providerResponse = await this.createPayosPaymentRequest({
+        orderCode,
+        amount,
+        description,
+      });
+      savedPayment.providerResponse = providerResponse;
+      savedPayment.providerPaymentLinkId = this.getOptionalString(providerResponse.paymentLinkId);
+      savedPayment.checkoutUrl = this.getOptionalString(providerResponse.checkoutUrl);
+      savedPayment.qrCode = this.getOptionalString(providerResponse.qrCode);
+
+      const providerStatus = this.getOptionalString(providerResponse.status)?.toUpperCase();
+      if (providerStatus === CustomerPaymentStatus.PAID) {
+        savedPayment.status = CustomerPaymentStatus.PAID;
+        savedPayment.paidAt = new Date();
+      }
+
+      const updatedPayment = await savedPayment.save();
+      return this.toPublicPaymentResponse(updatedPayment);
+    } catch (error) {
+      savedPayment.status = CustomerPaymentStatus.FAILED;
+      await savedPayment.save();
+      throw error;
+    }
+  }
+
+  private assertPayosConfigured() {
+    if (!process.env.PAYOS_CLIENT_ID || !process.env.PAYOS_API_KEY || !process.env.PAYOS_CHECKSUM_KEY) {
+      throw new BadRequestException('payOS is not configured');
+    }
+  }
+
+  private async generateUniquePayosOrderCode(): Promise<number> {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const orderCode = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+      const exists = await this.customerPaymentModel.exists({ orderCode }).exec();
+      if (!exists) return orderCode;
+    }
+    throw new BadRequestException('Unable to generate payment order code');
+  }
+
+  private buildPayosDescription(sessionId: string): string {
+    return `TraSua ${sessionId.slice(-8)}`;
+  }
+
+  private async createPayosPaymentRequest(payload: {
+    orderCode: number;
+    amount: number;
+    description: string;
+  }): Promise<Record<string, unknown>> {
+    const checksumKey = process.env.PAYOS_CHECKSUM_KEY || '';
+    const requestBody: Record<string, unknown> = {
+      orderCode: payload.orderCode,
+      amount: payload.amount,
+      description: payload.description,
+      returnUrl: process.env.PAYOS_RETURN_URL || 'https://web-khach-ts.vercel.app/home',
+      cancelUrl: process.env.PAYOS_CANCEL_URL || 'https://web-khach-ts.vercel.app/home',
+    };
+    requestBody.signature = this.createPayosSignature(requestBody, checksumKey);
+
+    const response = await fetch('https://api-merchant.payos.vn/v2/payment-requests', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-client-id': process.env.PAYOS_CLIENT_ID || '',
+        'x-api-key': process.env.PAYOS_API_KEY || '',
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    const responseBody = await response.json().catch(() => ({}));
+    const responseRecord = this.asRecord(responseBody);
+    const responseCode = this.getOptionalString(responseRecord.code);
+
+    if (!response.ok || (responseCode && responseCode !== '00')) {
+      const message = this.getOptionalString(responseRecord.desc)
+        || this.getOptionalString(responseRecord.message)
+        || 'Unable to create payOS payment';
+      throw new BadRequestException(message);
+    }
+
+    return this.asRecord(responseRecord.data);
+  }
+
+  private createPayosSignature(data: Record<string, unknown>, checksumKey: string): string {
+    const rawData = Object.keys(data)
+      .filter((key) => key !== 'signature' && data[key] !== undefined && data[key] !== null)
+      .sort()
+      .map((key) => `${key}=${this.stringifyPayosValue(data[key])}`)
+      .join('&');
+
+    return createHmac('sha256', checksumKey).update(rawData).digest('hex');
+  }
+
+  private stringifyPayosValue(value: unknown): string {
+    if (typeof value === 'object' && value !== null) {
+      return JSON.stringify(value);
+    }
+    return String(value);
+  }
+
+  private toPublicPaymentResponse(payment: CustomerPaymentDocument | any) {
+    return {
+      paymentId: payment._id.toString(),
+      provider: payment.provider,
+      status: payment.status,
+      orderCode: payment.orderCode,
+      amount: payment.amount,
+      description: payment.description,
+      checkoutUrl: payment.checkoutUrl,
+      qrCode: payment.qrCode,
+      paidAt: payment.paidAt,
+      createdAt: payment.createdAt,
+    };
+  }
+
+  private asRecord(value: unknown): Record<string, unknown> {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+    return {};
+  }
+
+  private getOptionalString(value: unknown): string | undefined {
+    return typeof value === 'string' && value.trim() ? value : undefined;
   }
 
   private async buildOrderItems(tenantId: string, itemDtos: any[]): Promise<PreparedOrderItem[]> {

@@ -12,6 +12,8 @@ import { MenuModule } from '../menu/menu.module';
 import { MenuItem, MenuItemSchema } from '../menu/schemas/menu-item.schema';
 import { MenuItemRecipe, MenuItemRecipeSchema } from '../menu/schemas/menu-item-recipe.schema';
 import { TableSession, TableSessionSchema } from './schemas/table-session.schema';
+import { CustomerRequest, CustomerRequestSchema } from './schemas/customer-request.schema';
+import { CustomerPayment, CustomerPaymentSchema } from './schemas/customer-payment.schema';
 
 @Module({
   imports: [
@@ -23,6 +25,8 @@ import { TableSession, TableSessionSchema } from './schemas/table-session.schema
       { name: MenuItem.name, schema: MenuItemSchema },
       { name: MenuItemRecipe.name, schema: MenuItemRecipeSchema },
       { name: TableSession.name, schema: TableSessionSchema },
+      { name: CustomerRequest.name, schema: CustomerRequestSchema },
+      { name: CustomerPayment.name, schema: CustomerPaymentSchema },
     ]),
     InventoryModule,
     MenuModule,

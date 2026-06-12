@@ -15,6 +15,7 @@ import { AttendanceModule } from './attendance/attendance.module';
 import { ChatModule } from './chat/chat.module';
 import { ReportsModule } from './reports/reports.module';
 import { MenuModule } from './menu/menu.module';
+import { PaymentsModule } from './payments/payments.module';
 
 function isRedisQueueDisabled() {
   return process.env.DISABLE_REDIS_QUEUE === 'true' || process.env.REDIS_DISABLED === 'true';
@@ -92,6 +93,7 @@ function getRedisConnectionOptions(configService: ConfigService) {
     AttendanceModule,
     ChatModule,
     ReportsModule,
+    PaymentsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

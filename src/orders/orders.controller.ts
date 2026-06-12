@@ -8,6 +8,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '../users/schemas/user.schema';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { OrderItemStatus } from './schemas/order.schema';
+import { CreateCustomerRequestDto } from './dto/customer-request.dto';
 
 @Controller('orders')
 export class OrdersController {
@@ -39,6 +40,22 @@ export class OrdersController {
   @Get(':tenantId/status/:orderId')
   getOrderStatus(@Param('tenantId') tenantId: string, @Param('orderId') orderId: string) {
     return this.ordersService.getPublicOrderStatus(tenantId, orderId);
+  }
+
+  // 1d. Public customer table session summary
+  @Get(':tenantId/table-session/:sessionId/summary')
+  getTableSessionSummary(@Param('tenantId') tenantId: string, @Param('sessionId') sessionId: string) {
+    return this.ordersService.getTableSessionSummary(tenantId, sessionId);
+  }
+
+  // 1e. Public customer support/payment request endpoint
+  @Post(':tenantId/table-request/:qrToken')
+  createCustomerRequest(
+    @Param('tenantId') tenantId: string,
+    @Param('qrToken') qrToken: string,
+    @Body() dto: CreateCustomerRequestDto,
+  ) {
+    return this.ordersService.createCustomerRequest(tenantId, qrToken, dto);
   }
 
   // 2. Staff Manual Order endpoint (requires IP whitelist)
