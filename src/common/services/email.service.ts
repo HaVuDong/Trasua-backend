@@ -1,34 +1,58 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
 import { Resend } from 'resend';
 
 @Injectable()
 export class EmailService {
+  private readonly logger = new Logger(EmailService.name);
+
   constructor(private readonly configService: ConfigService) {}
+
+  private getConfig(name: string) {
+    return (this.configService.get<string>(name) || process.env[name] || '').trim();
+  }
+
+  private isTruthy(value?: string) {
+    return ['true', '1', 'yes', 'on'].includes((value || '').trim().toLowerCase());
+  }
+
+  private maskEmail(email: string) {
+    const [localPart, domain] = email.split('@');
+    if (!localPart || !domain) return email;
+    return `${localPart.slice(0, 2)}***@${domain}`;
+  }
 
   private hasSmtpConfig() {
     return Boolean(
-      this.configService.get<string>('SMTP_HOST') &&
-        this.configService.get<string>('SMTP_PORT') &&
-        this.configService.get<string>('SMTP_USER') &&
-        this.configService.get<string>('SMTP_PASS'),
+      this.getConfig('SMTP_HOST') &&
+        this.getConfig('SMTP_PORT') &&
+        this.getConfig('SMTP_USER') &&
+        this.getConfig('SMTP_PASS'),
     );
   }
 
   private hasResendConfig() {
-    return Boolean(this.configService.get<string>('RESEND_API_KEY'));
+    return Boolean(this.getConfig('RESEND_API_KEY'));
   }
 
   private isProduction() {
-    return this.configService.get<string>('NODE_ENV') === 'production' || process.env.NODE_ENV === 'production';
+    return this.getConfig('NODE_ENV') === 'production' || process.env.NODE_ENV === 'production';
   }
 
   private isDeviceOtpDisabled() {
-    return (
-      this.configService.get<string>('DISABLE_DEVICE_OTP') === 'true' ||
-      this.configService.get<string>('AUTH_DISABLE_DEVICE_OTP') === 'true'
-    );
+    const disabled =
+      this.isTruthy(this.getConfig('DISABLE_DEVICE_OTP')) ||
+      this.isTruthy(this.getConfig('AUTH_DISABLE_DEVICE_OTP'));
+
+    if (!disabled) return false;
+
+    if (this.isProduction() && !this.isTruthy(this.getConfig('ALLOW_PRODUCTION_DEVICE_OTP_BYPASS'))) {
+      this.logger.warn('Device OTP bypass is ignored in production. Configure Resend instead.');
+      return false;
+    }
+
+    return true;
   }
 
   shouldSkipDeviceOtp() {
@@ -43,38 +67,42 @@ export class EmailService {
   }
 
   private async sendViaResend(email: string, otp: string, name?: string): Promise<void> {
-    const apiKey = this.configService.get<string>('RESEND_API_KEY')!;
-    const from = this.configService.get<string>('RESEND_FROM') || 'onboarding@resend.dev';
+    const apiKey = this.getConfig('RESEND_API_KEY');
+    const from = this.getConfig('RESEND_FROM') || 'onboarding@resend.dev';
     const { subject, text } = this.buildOtpEmailContent(email, otp, name);
 
     const resend = new Resend(apiKey);
-    const { error } = await resend.emails.send({ from, to: email, subject, text });
+    const { data, error } = await resend.emails.send({ from, to: email, subject, text });
 
     if (error) {
       console.error('[Resend] Failed to send OTP email:', error);
       throw new ServiceUnavailableException('Khong gui duoc OTP qua Resend: ' + (error.message || 'unknown error'));
     }
+
+    this.logger.log(
+      `OTP email accepted by Resend for ${this.maskEmail(email)}${data?.id ? ` (id: ${data.id})` : ''}`,
+    );
   }
 
   private async sendViaSmtp(email: string, otp: string, name?: string): Promise<void> {
-    const port = Number(this.configService.get<string>('SMTP_PORT'));
+    const port = Number(this.getConfig('SMTP_PORT'));
     const transporter = nodemailer.createTransport({
-      host: this.configService.get<string>('SMTP_HOST'),
+      host: this.getConfig('SMTP_HOST'),
       port,
       secure: port === 465,
-      connectionTimeout: Number(this.configService.get<string>('SMTP_CONNECTION_TIMEOUT_MS') || 5000),
-      greetingTimeout: Number(this.configService.get<string>('SMTP_GREETING_TIMEOUT_MS') || 5000),
-      socketTimeout: Number(this.configService.get<string>('SMTP_SOCKET_TIMEOUT_MS') || 8000),
+      connectionTimeout: Number(this.getConfig('SMTP_CONNECTION_TIMEOUT_MS') || 5000),
+      greetingTimeout: Number(this.getConfig('SMTP_GREETING_TIMEOUT_MS') || 5000),
+      socketTimeout: Number(this.getConfig('SMTP_SOCKET_TIMEOUT_MS') || 8000),
       auth: {
-        user: this.configService.get<string>('SMTP_USER'),
-        pass: this.configService.get<string>('SMTP_PASS'),
+        user: this.getConfig('SMTP_USER'),
+        pass: this.getConfig('SMTP_PASS'),
       },
     });
 
     const { subject, text } = this.buildOtpEmailContent(email, otp, name);
 
     await transporter.sendMail({
-      from: this.configService.get<string>('SMTP_FROM') || this.configService.get<string>('SMTP_USER'),
+      from: this.getConfig('SMTP_FROM') || this.getConfig('SMTP_USER'),
       to: email,
       subject,
       text,
@@ -86,28 +114,20 @@ export class EmailService {
       throw new ServiceUnavailableException('Tai khoan chua co email de nhan OTP');
     }
 
-    // 1. Priority: Resend API (works on all platforms, no port restrictions)
+    // Priority: Resend API works on Render because it uses HTTPS instead of blocked SMTP ports.
     if (this.hasResendConfig()) {
       await this.sendViaResend(email, otp, name);
       return { delivered: true };
     }
 
-    // 2. Fallback: SMTP (works locally or on platforms that don't block SMTP ports)
-    if (this.hasSmtpConfig()) {
-      if (this.isProduction()) {
-        // In production without Resend, SMTP may timeout on Render — attempt anyway
-        try {
-          await this.sendViaSmtp(email, otp, name);
-          return { delivered: true };
-        } catch (err: any) {
-          console.error('[SMTP] Failed in production:', err.message || err);
-          throw new ServiceUnavailableException(
-            'Khong gui duoc OTP qua SMTP. Hay cau hinh RESEND_API_KEY de gui email qua Resend API.',
-          );
-        }
-      }
+    if (this.isProduction()) {
+      throw new ServiceUnavailableException(
+        'RESEND_API_KEY chua duoc cau hinh. Production deploy phai dung Resend API de gui OTP.',
+      );
+    }
 
-      // Non-production with SMTP: attempt send, fallback to devOtp on failure
+    // Local fallback only. Production deploys must fail loudly when Resend is missing.
+    if (this.hasSmtpConfig()) {
       try {
         await this.sendViaSmtp(email, otp, name);
         return { delivered: true };
@@ -116,11 +136,6 @@ export class EmailService {
         console.warn(`[DEV OTP] ${email}: ${otp}`);
         return { delivered: false, devOtp: otp };
       }
-    }
-
-    // 3. No email provider configured
-    if (this.isProduction()) {
-      throw new ServiceUnavailableException('SMTP chua duoc cau hinh de gui OTP');
     }
 
     console.warn(`[DEV OTP] ${email}: ${otp}`);

@@ -48,10 +48,26 @@ Render blocks outbound SMTP ports (587, 465). Use **Resend API** which sends via
 ```bash
 RESEND_API_KEY=re_xxxxxxxxxxxx
 RESEND_FROM=onboarding@resend.dev
+RESEND_TEST_TO=your-resend-account@gmail.com
 DISABLE_DEVICE_OTP=false
+AUTH_DISABLE_DEVICE_OTP=false
 ```
 
 > With the free plan, emails are sent from `onboarding@resend.dev`. To use a custom sender, verify your domain on Resend.
+
+You can test the Resend credentials locally before deploying:
+
+```bash
+npm run test:resend
+```
+
+By default this sends to `RESEND_TEST_TO`; if that is empty, it sends to `SMTP_USER`. You can also pass a recipient directly:
+
+```bash
+npm run test:resend -- --to=your-resend-account@gmail.com
+```
+
+In production, the backend requires `RESEND_API_KEY` for OTP email. It will not fall back to SMTP because Render blocks outbound SMTP ports.
 
 ## Render: Disable OTP (demo only)
 
@@ -61,7 +77,7 @@ If you just need a quick demo without email OTP:
 DISABLE_DEVICE_OTP=true
 ```
 
-For production, always keep OTP enabled with Resend API configured.
+For production, always keep OTP enabled with Resend API configured. Production ignores `DISABLE_DEVICE_OTP=true` unless `ALLOW_PRODUCTION_DEVICE_OTP_BYPASS=true` is also set.
 
 ## Local Redis mock
 
