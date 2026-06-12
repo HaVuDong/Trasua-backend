@@ -185,6 +185,61 @@ describe('AuthService', () => {
     expect(userDoc.trustedDevices).toEqual([]);
   });
 
+  it('requires OTP again for legacy trusted devices that were never OTP verified', async () => {
+    const userDoc = buildUserDoc({
+      role: Role.ADMIN,
+      trustedDevices: [
+        { deviceId: 'legacy-bypassed-device', userAgent: 'old', ip: '1.1.1.1', lastLogin: new Date() },
+      ],
+    });
+    userModel.findById.mockReturnValue({
+      exec: jest.fn().mockResolvedValue(userDoc),
+    });
+
+    const result = await service.checkDeviceAndLogin(
+      { _id: userDoc._id.toString() },
+      'legacy-bypassed-device',
+      'test-agent',
+      '2.2.2.2',
+    );
+
+    expect(result.requiresDeviceVerification).toBe(true);
+    expect(emailService.sendDeviceOtp).toHaveBeenCalledWith(userDoc.email, expect.stringMatching(/^\d{6}$/), undefined);
+  });
+
+  it('logs in directly for devices already verified by OTP', async () => {
+    const userDoc = buildUserDoc({
+      role: Role.ADMIN,
+      trustedDevices: [
+        {
+          deviceId: 'otp-verified-device',
+          userAgent: 'old',
+          ip: '1.1.1.1',
+          lastLogin: new Date(),
+          verifiedAt: new Date(),
+          trustMethod: 'OTP',
+        },
+      ],
+    });
+    userModel.findById.mockReturnValue({
+      exec: jest.fn().mockResolvedValue(userDoc),
+    });
+
+    const result = await service.checkDeviceAndLogin(
+      { _id: userDoc._id.toString() },
+      'otp-verified-device',
+      'test-agent',
+      '2.2.2.2',
+    );
+
+    expect(result.access_token).toBe('signed-token');
+    expect(emailService.sendDeviceOtp).not.toHaveBeenCalled();
+    expect(userDoc.trustedDevices[0]).toMatchObject({
+      userAgent: 'test-agent',
+      ip: '2.2.2.2',
+    });
+  });
+
   it('returns password-change token after OTP when user must change password', async () => {
     const userDoc = buildUserDoc({
       role: Role.USER,
@@ -212,6 +267,10 @@ describe('AuthService', () => {
       { expiresIn: '5m' },
     );
     expect(userDoc.trustedDevices).toHaveLength(1);
+    expect(userDoc.trustedDevices[0]).toMatchObject({
+      verifiedAt: expect.any(Date),
+      trustMethod: 'OTP',
+    });
     expect(userDoc.localOtpCode).toBeUndefined();
     expect(userDoc.localOtpExpires).toBeUndefined();
   });

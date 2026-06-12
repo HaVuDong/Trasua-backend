@@ -47,20 +47,36 @@ export class AuthService {
     };
   }
 
-  private async upsertTrustedDevice(userDoc: UserDocument, deviceId: string, userAgent: string, ip: string) {
+  private hasOtpVerifiedDevice(userDoc: UserDocument, deviceId: string) {
+    return userDoc.trustedDevices.some((d) => d.deviceId === deviceId && Boolean(d.verifiedAt));
+  }
+
+  private async upsertTrustedDevice(
+    userDoc: UserDocument,
+    deviceId: string,
+    userAgent: string,
+    ip: string,
+    trustMethod: string,
+  ) {
+    const verifiedAt = new Date();
     const deviceExists = userDoc.trustedDevices.some((d) => d.deviceId === deviceId);
     if (!deviceExists) {
       userDoc.trustedDevices.push({
         deviceId,
         userAgent,
         ip,
-        lastLogin: new Date(),
+        lastLogin: verifiedAt,
+        verifiedAt,
+        trustMethod,
       });
     } else {
       const dev = userDoc.trustedDevices.find((d) => d.deviceId === deviceId);
       if (dev) {
+        dev.userAgent = userAgent;
         dev.ip = ip;
-        dev.lastLogin = new Date();
+        dev.lastLogin = verifiedAt;
+        dev.verifiedAt = verifiedAt;
+        dev.trustMethod = trustMethod;
         userDoc.markModified('trustedDevices');
       }
     }
@@ -141,17 +157,23 @@ export class AuthService {
     if (isSystemOwner) {
       const deviceExists = userDoc.trustedDevices.some(d => d.deviceId === deviceId);
       if (!deviceExists) {
+        const now = new Date();
         userDoc.trustedDevices.push({
           deviceId,
           userAgent,
           ip,
-          lastLogin: new Date(),
+          lastLogin: now,
+          verifiedAt: now,
+          trustMethod: 'SYSTEM_OWNER',
         });
       } else {
         const dev = userDoc.trustedDevices.find(d => d.deviceId === deviceId);
         if (dev) {
+          dev.userAgent = userAgent;
           dev.ip = ip;
           dev.lastLogin = new Date();
+          dev.verifiedAt = dev.verifiedAt || new Date();
+          dev.trustMethod = dev.trustMethod || 'SYSTEM_OWNER';
           userDoc.markModified('trustedDevices');
         }
       }
@@ -189,11 +211,11 @@ export class AuthService {
     }
 
     // Normal users: device verification flow
-    const deviceExists = userDoc.trustedDevices.some(d => d.deviceId === deviceId);
+    const deviceExists = this.hasOtpVerifiedDevice(userDoc, deviceId);
 
     if (!deviceExists) {
       if (this.emailService.shouldSkipDeviceOtp()) {
-        await this.upsertTrustedDevice(userDoc, deviceId, userAgent, ip);
+        await this.upsertTrustedDevice(userDoc, deviceId, userAgent, ip, 'BYPASS');
         return this.buildLoginResponse(userDoc);
       }
 
@@ -225,6 +247,7 @@ export class AuthService {
       // Update last login info
       const dev = userDoc.trustedDevices.find(d => d.deviceId === deviceId);
       if (dev) {
+        dev.userAgent = userAgent;
         dev.ip = ip;
         dev.lastLogin = new Date();
         userDoc.markModified('trustedDevices');
@@ -253,13 +276,25 @@ export class AuthService {
       throw new UnauthorizedException('OTP code has expired');
     }
 
-    // Add device to trusted
-    userDoc.trustedDevices.push({
-      deviceId,
-      userAgent,
-      ip,
-      lastLogin: new Date(),
-    });
+    const now = new Date();
+    const existingDevice = userDoc.trustedDevices.find((d) => d.deviceId === deviceId);
+    if (existingDevice) {
+      existingDevice.userAgent = userAgent;
+      existingDevice.ip = ip;
+      existingDevice.lastLogin = now;
+      existingDevice.verifiedAt = now;
+      existingDevice.trustMethod = 'OTP';
+      userDoc.markModified('trustedDevices');
+    } else {
+      userDoc.trustedDevices.push({
+        deviceId,
+        userAgent,
+        ip,
+        lastLogin: now,
+        verifiedAt: now,
+        trustMethod: 'OTP',
+      });
+    }
 
     // Clear OTP
     userDoc.localOtpCode = undefined;

@@ -42,6 +42,12 @@ export class DeviceInfo {
 
   @Prop({ required: true })
   lastLogin: Date;
+
+  @Prop()
+  verifiedAt?: Date;
+
+  @Prop()
+  trustMethod?: string;
 }
 
 @Schema({ timestamps: true })
