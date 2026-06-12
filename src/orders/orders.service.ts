@@ -280,9 +280,21 @@ export class OrdersService {
     const order = await this.orderModel.findOne({
       _id: orderId,
       tenantId: tenantObjectId,
-    }).exec();
+    })
+      .populate('items.itemId', 'name category imageUrl sellingPrice status')
+      .exec();
     if (!order) throw new NotFoundException('Order not found');
-    return { status: order.status };
+    return {
+      status: order.status,
+      items: (order.items || []).map((item: any) => ({
+        _id: item._id?.toString() || this.getOrderItemMenuId(item),
+        itemId: this.getOrderItemMenuId(item),
+        name: this.getOrderItemName(item),
+        quantity: Number(item.quantity || 0),
+        status: item.status,
+        note: item.note,
+      })),
+    };
   }
 
   async getTableSessionSummary(tenantId: string, sessionId: string) {
