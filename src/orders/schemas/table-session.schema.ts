@@ -8,6 +8,18 @@ export enum TableSessionStatus {
   CLOSED = 'CLOSED',
 }
 
+export enum TableSessionPaymentStatus {
+  UNPAID = 'UNPAID',
+  REQUESTED = 'REQUESTED',
+  PAID = 'PAID',
+}
+
+export enum TableSessionPaymentMethod {
+  CASH = 'CASH',
+  TRANSFER = 'TRANSFER',
+  MANUAL = 'MANUAL',
+}
+
 @Schema({ timestamps: true })
 export class TableSession {
   @Prop({ type: Types.ObjectId, ref: 'Tenant', required: true, index: true })
@@ -36,6 +48,18 @@ export class TableSession {
 
   @Prop()
   customerPhone?: string;
+
+  @Prop({ type: String, enum: TableSessionPaymentStatus, default: TableSessionPaymentStatus.UNPAID, index: true })
+  paymentStatus: TableSessionPaymentStatus;
+
+  @Prop()
+  paidAt?: Date;
+
+  @Prop({ type: Types.ObjectId, ref: 'User' })
+  paidBy?: Types.ObjectId;
+
+  @Prop({ type: String, enum: TableSessionPaymentMethod })
+  paymentMethod?: TableSessionPaymentMethod;
 }
 
 export const TableSessionSchema = SchemaFactory.createForClass(TableSession);

@@ -19,11 +19,18 @@ import {
   MenuRecipeIngredient,
   MenuRecipeStatus,
 } from '../menu/schemas/menu-item-recipe.schema';
-import { TableSession, TableSessionDocument, TableSessionStatus } from './schemas/table-session.schema';
+import {
+  TableSession,
+  TableSessionDocument,
+  TableSessionPaymentMethod,
+  TableSessionPaymentStatus,
+  TableSessionStatus,
+} from './schemas/table-session.schema';
 import {
   CustomerPaymentMethod,
   CustomerRequest,
   CustomerRequestDocument,
+  CustomerRequestStatus,
   CustomerRequestType,
 } from './schemas/customer-request.schema';
 import {
@@ -334,12 +341,25 @@ export class OrdersService {
       tableSession.customerName = dto.customerName || tableSession.customerName;
       tableSession.customerPhone = dto.customerPhone || tableSession.customerPhone;
       tableSession.lastActivityAt = new Date();
-      await tableSession.save();
     }
 
     const summary = await this.buildTableSessionSummary(tenantObjectId, sessionObjectId);
     const paymentMethod = this.getRequestPaymentMethod(requestType, dto.paymentMethod);
     let payment: any = null;
+
+    if (
+      requestType === CustomerRequestType.PAY_CASH ||
+      requestType === CustomerRequestType.PAY_TRANSFER ||
+      requestType === CustomerRequestType.PRINT_BILL
+    ) {
+      tableSession.paymentStatus = TableSessionPaymentStatus.REQUESTED;
+      tableSession.paymentMethod =
+        paymentMethod === CustomerPaymentMethod.CASH
+          ? TableSessionPaymentMethod.CASH
+          : TableSessionPaymentMethod.TRANSFER;
+    }
+    tableSession.lastActivityAt = new Date();
+    await tableSession.save();
 
     if (requestType === CustomerRequestType.PRINT_BILL) {
       payment = await this.ensurePayosPaymentForSession(tenantObjectId, tableSession, summary);
@@ -398,9 +418,11 @@ export class OrdersService {
     if (dto.customerName || dto.customerPhone) {
       tableSession.customerName = dto.customerName || tableSession.customerName;
       tableSession.customerPhone = dto.customerPhone || tableSession.customerPhone;
-      tableSession.lastActivityAt = new Date();
-      await tableSession.save();
     }
+    tableSession.paymentStatus = TableSessionPaymentStatus.REQUESTED;
+    tableSession.paymentMethod = TableSessionPaymentMethod.TRANSFER;
+    tableSession.lastActivityAt = new Date();
+    await tableSession.save();
 
     const summary = await this.buildTableSessionSummary(tenantObjectId, sessionObjectId);
     return this.ensurePayosPaymentForSession(tenantObjectId, tableSession, summary);
@@ -657,17 +679,41 @@ export class OrdersService {
     return savedOrder;
   }
 
-  async updateItemStatus(tenantId: string, orderId: string, itemId: string, status: OrderItemStatus): Promise<Order> {
+  async updateItemStatus(
+    tenantId: string,
+    orderId: string,
+    itemId: string,
+    status: OrderItemStatus,
+    userRole?: string,
+  ): Promise<Order> {
+    if (!Object.values(OrderItemStatus).includes(status)) {
+      throw new BadRequestException('Invalid item status');
+    }
+
     const order = await this.orderModel.findOne({ _id: orderId, tenantId: new Types.ObjectId(tenantId) }).exec();
     if (!order) throw new NotFoundException('Order not found');
 
     const item = order.items.find((i: any) => (i as any)._id?.toString() === itemId || i.itemId.toString() === itemId);
     if (!item) throw new NotFoundException('Item not found in order');
 
+    if (userRole === 'KITCHEN') {
+      if (order.status !== OrderStatus.IN_PROGRESS || item.status !== OrderItemStatus.PREPARING || status !== OrderItemStatus.READY) {
+        throw new ForbiddenException('Bep chi duoc chuyen mon dang lam sang da xong.');
+      }
+    }
+
+    if (userRole === 'USER') {
+      if (order.status !== OrderStatus.IN_PROGRESS || item.status !== OrderItemStatus.READY || status !== OrderItemStatus.SERVED) {
+        throw new ForbiddenException('Nhan vien chi duoc chuyen mon da xong sang da phuc vu.');
+      }
+    }
+
     item.status = status;
 
     const nonCancelledItems = order.items.filter((i: any) => i.status !== OrderItemStatus.CANCELLED);
-    const allReady = nonCancelledItems.length > 0 && nonCancelledItems.every((i: any) => i.status === OrderItemStatus.READY);
+    const allReady = nonCancelledItems.length > 0 && nonCancelledItems.every((i: any) =>
+      i.status === OrderItemStatus.READY || i.status === OrderItemStatus.SERVED,
+    );
     if (allReady) {
       this.chatGateway.sendOrderEvent(tenantId, 'allItemsReady', { orderId });
     }
@@ -831,6 +877,280 @@ export class OrdersService {
 
     this.chatGateway.sendOrderEvent(tenantId, 'orderCompleted', savedOrder);
     return savedOrder;
+  }
+
+  async getStaffWorkspace(tenantId: string) {
+    const tenantObjectId = new Types.ObjectId(tenantId);
+    const sessions = await this.tableSessionModel.find({
+      tenantId: tenantObjectId,
+      status: TableSessionStatus.OPEN,
+    })
+      .sort({ lastActivityAt: -1, openedAt: -1 })
+      .exec();
+
+    if (sessions.length === 0) {
+      return { sessions: [] };
+    }
+
+    const sessionIds = sessions.map((session) => session._id as Types.ObjectId);
+    const tableIds = Array.from(new Set(sessions.map((session) => session.tableId.toString())))
+      .filter((id) => Types.ObjectId.isValid(id))
+      .map((id) => new Types.ObjectId(id));
+
+    const [tables, orders, requests] = await Promise.all([
+      this.tableModel.find({ _id: { $in: tableIds }, tenantId: tenantObjectId }).exec(),
+      this.orderModel.find({
+        tenantId: tenantObjectId,
+        sessionId: { $in: sessionIds },
+        status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+      })
+        .populate('items.itemId', 'name category imageUrl sellingPrice status')
+        .sort({ createdAt: -1 })
+        .exec(),
+      this.customerRequestModel.find({
+        tenantId: tenantObjectId,
+        sessionId: { $in: sessionIds },
+        status: { $in: [CustomerRequestStatus.PENDING, CustomerRequestStatus.ACKNOWLEDGED] },
+      })
+        .sort({ createdAt: -1 })
+        .exec(),
+    ]);
+
+    const tableById = new Map(tables.map((table) => [table._id.toString(), table]));
+    const ordersBySession = new Map<string, any[]>();
+    const requestsBySession = new Map<string, any[]>();
+
+    orders.forEach((order) => {
+      const key = order.sessionId?.toString?.() || '';
+      if (!key) return;
+      const existing = ordersBySession.get(key) || [];
+      existing.push(order);
+      ordersBySession.set(key, existing);
+    });
+
+    requests.forEach((request) => {
+      const key = request.sessionId?.toString?.() || '';
+      if (!key) return;
+      const existing = requestsBySession.get(key) || [];
+      existing.push(request);
+      requestsBySession.set(key, existing);
+    });
+
+    return {
+      sessions: sessions
+        .map((tableSession) => {
+          const sessionId = (tableSession._id as Types.ObjectId).toString();
+          const table = tableById.get(tableSession.tableId.toString());
+          const sessionOrders = ordersBySession.get(sessionId) || [];
+          const sessionRequests = requestsBySession.get(sessionId) || [];
+          const publicOrders = sessionOrders.map((order) => this.toPublicSessionOrder(order));
+          const billItems = publicOrders.flatMap((order: any) =>
+            order.items
+              .filter((item: any) => item.status !== OrderItemStatus.CANCELLED && !item.isFree)
+              .map((item: any) => ({
+                ...item,
+                orderId: order._id,
+                orderCode: order._id.slice(-6).toUpperCase(),
+              })),
+          );
+          const subtotal = billItems.reduce((sum, item) => sum + item.subtotal, 0);
+          const totalQuantity = billItems.reduce((sum, item) => sum + item.quantity, 0);
+
+          return {
+            sessionId,
+            table: {
+              _id: tableSession.tableId.toString(),
+              name: table?.name || tableSession.qrCodeTokenSnapshot || 'Mang di',
+              status: table?.status,
+            },
+            customer: {
+              name: tableSession.customerName || '',
+              phone: tableSession.customerPhone || '',
+            },
+            paymentStatus: tableSession.paymentStatus || TableSessionPaymentStatus.UNPAID,
+            paymentMethod: tableSession.paymentMethod,
+            openedAt: tableSession.openedAt,
+            lastActivityAt: tableSession.lastActivityAt,
+            orders: publicOrders,
+            requests: sessionRequests.map((request) => ({
+              _id: (request._id as Types.ObjectId).toString(),
+              type: request.type,
+              status: request.status,
+              paymentMethod: request.paymentMethod,
+              message: request.message,
+              customerName: request.customerName,
+              customerPhone: request.customerPhone,
+              tableName: request.tableNameSnapshot || table?.name,
+              createdAt: (request as any).createdAt,
+              updatedAt: (request as any).updatedAt,
+            })),
+            bill: {
+              orderCount: publicOrders.length,
+              itemCount: billItems.length,
+              totalQuantity,
+              subtotal,
+              finalAmount: subtotal,
+              items: billItems,
+            },
+          };
+        })
+        .filter((session) => session.orders.length > 0 || session.requests.length > 0),
+    };
+  }
+
+  async getKitchenQueue(tenantId: string) {
+    const orders = await this.orderModel.find({
+      tenantId: new Types.ObjectId(tenantId),
+      status: OrderStatus.IN_PROGRESS,
+    })
+      .populate('tableId', 'name status')
+      .populate('items.itemId', 'name category imageUrl status')
+      .sort({ confirmedAt: 1, createdAt: 1 })
+      .exec();
+
+    const queue: any[] = [];
+    orders.forEach((order: any) => {
+      const tableName = typeof order.tableId === 'object' && order.tableId?.name ? order.tableId.name : 'Mang di';
+      const tableId = typeof order.tableId === 'object' && order.tableId?._id ? order.tableId._id.toString() : order.tableId?.toString?.();
+
+      (order.items || []).forEach((item: any) => {
+        if (![OrderItemStatus.PREPARING, OrderItemStatus.READY].includes(item.status)) return;
+        const itemRef = item.itemId;
+        queue.push({
+          orderId: order._id.toString(),
+          orderCode: order._id.toString().slice(-6).toUpperCase(),
+          orderItemId: item._id?.toString() || this.getOrderItemMenuId(item),
+          tableId,
+          tableName,
+          sessionId: order.sessionId?.toString?.(),
+          itemId: this.getOrderItemMenuId(item),
+          name: itemRef && typeof itemRef === 'object' && itemRef.name ? itemRef.name : this.getOrderItemName(item),
+          quantity: Number(item.quantity || 0),
+          note: item.note,
+          status: item.status,
+          createdAt: order.createdAt,
+          confirmedAt: order.confirmedAt,
+        });
+      });
+    });
+
+    return { items: queue };
+  }
+
+  async updateCustomerRequestStatus(tenantId: string, requestId: string, status: string) {
+    if (!Types.ObjectId.isValid(requestId)) {
+      throw new BadRequestException('Invalid customer request');
+    }
+    if (![
+      CustomerRequestStatus.ACKNOWLEDGED,
+      CustomerRequestStatus.DONE,
+      CustomerRequestStatus.CANCELLED,
+    ].includes(status as CustomerRequestStatus)) {
+      throw new BadRequestException('Invalid customer request status');
+    }
+
+    const request = await this.customerRequestModel.findOne({
+      _id: new Types.ObjectId(requestId),
+      tenantId: new Types.ObjectId(tenantId),
+    }).exec();
+
+    if (!request) {
+      throw new NotFoundException('Customer request not found');
+    }
+
+    request.status = status as CustomerRequestStatus;
+    const savedRequest = await request.save();
+    const payload = {
+      _id: savedRequest._id.toString(),
+      type: savedRequest.type,
+      status: savedRequest.status,
+      tableId: savedRequest.tableId.toString(),
+      sessionId: savedRequest.sessionId.toString(),
+      tableName: savedRequest.tableNameSnapshot,
+      updatedAt: (savedRequest as any).updatedAt,
+    };
+
+    this.chatGateway.sendOrderEvent(tenantId, 'customerRequestUpdated', payload);
+    return payload;
+  }
+
+  async manualCheckoutTableSession(
+    tenantId: string,
+    sessionId: string,
+    paidBy: string,
+    discount = 0,
+    discountType: string = 'FLAT',
+  ) {
+    const tenantObjectId = new Types.ObjectId(tenantId);
+    const sessionObjectId = this.toObjectId(sessionId, 'Invalid table session');
+    const tableSession = await this.tableSessionModel.findOne({
+      _id: sessionObjectId,
+      tenantId: tenantObjectId,
+      status: TableSessionStatus.OPEN,
+    }).exec();
+
+    if (!tableSession) {
+      throw new NotFoundException('Open table session not found');
+    }
+
+    const orders = await this.orderModel.find({
+      tenantId: tenantObjectId,
+      sessionId: sessionObjectId,
+      status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+    })
+      .sort({ createdAt: 1 })
+      .exec();
+
+    if (orders.length === 0) {
+      throw new BadRequestException('Table session has no active orders');
+    }
+
+    const pendingOrder = orders.find((order) => order.status === OrderStatus.PENDING);
+    if (pendingOrder) {
+      throw new BadRequestException('Confirm pending orders before checkout');
+    }
+
+    const completedOrders: Order[] = [];
+    let totalAmount = 0;
+    for (const order of orders) {
+      const completed = await this.checkout(tenantId, order._id.toString(), discount, discountType);
+      completedOrders.push(completed);
+      totalAmount += Number((completed as any).finalAmount || 0);
+    }
+
+    await this.tableSessionModel.updateOne(
+      { _id: sessionObjectId, tenantId: tenantObjectId },
+      {
+        $set: {
+          paymentStatus: TableSessionPaymentStatus.PAID,
+          paymentMethod: TableSessionPaymentMethod.MANUAL,
+          paidAt: new Date(),
+          paidBy: new Types.ObjectId(paidBy),
+          lastActivityAt: new Date(),
+        },
+      },
+    ).exec();
+
+    await this.customerRequestModel.updateMany(
+      {
+        tenantId: tenantObjectId,
+        sessionId: sessionObjectId,
+        type: { $in: [CustomerRequestType.PAY_CASH, CustomerRequestType.PAY_TRANSFER, CustomerRequestType.PRINT_BILL] },
+        status: { $in: [CustomerRequestStatus.PENDING, CustomerRequestStatus.ACKNOWLEDGED] },
+      },
+      { $set: { status: CustomerRequestStatus.DONE } },
+    ).exec();
+
+    const payload = {
+      sessionId,
+      paymentStatus: TableSessionPaymentStatus.PAID,
+      paymentMethod: TableSessionPaymentMethod.MANUAL,
+      orderIds: completedOrders.map((order: any) => order._id.toString()),
+      totalAmount,
+      paidAt: new Date(),
+    };
+    this.chatGateway.sendOrderEvent(tenantId, 'manualCheckoutCompleted', payload);
+    return payload;
   }
 
   async findAllActive(tenantId: string): Promise<Order[]> {
@@ -1000,6 +1320,9 @@ export class OrdersService {
       session: {
         _id: (tableSession._id as Types.ObjectId).toString(),
         status: tableSession.status,
+        paymentStatus: tableSession.paymentStatus || TableSessionPaymentStatus.UNPAID,
+        paymentMethod: tableSession.paymentMethod,
+        paidAt: tableSession.paidAt,
         openedAt: tableSession.openedAt,
         lastActivityAt: tableSession.lastActivityAt,
       },

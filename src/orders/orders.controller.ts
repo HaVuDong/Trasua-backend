@@ -74,6 +74,43 @@ export class OrdersController {
     return this.ordersService.findAllActive(user.tenantId);
   }
 
+  @Get('staff/workspace')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
+  getStaffWorkspace(@CurrentUser() user: any) {
+    return this.ordersService.getStaffWorkspace(user.tenantId);
+  }
+
+  @Get('kitchen/queue')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.KITCHEN)
+  getKitchenQueue(@CurrentUser() user: any) {
+    return this.ordersService.getKitchenQueue(user.tenantId);
+  }
+
+  @Patch('customer-requests/:id/status')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
+  updateCustomerRequestStatus(
+    @CurrentUser() user: any,
+    @Param('id') id: string,
+    @Body('status') status: string,
+  ) {
+    return this.ordersService.updateCustomerRequestStatus(user.tenantId, id, status);
+  }
+
+  @Post('table-sessions/:sessionId/manual-checkout')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
+  manualCheckoutTableSession(
+    @CurrentUser() user: any,
+    @Param('sessionId') sessionId: string,
+    @Body('discount') discount = 0,
+    @Body('discountType') discountType = 'FLAT',
+  ) {
+    return this.ordersService.manualCheckoutTableSession(user.tenantId, sessionId, user.userId, discount, discountType);
+  }
+
   // 4. Search/filter orders
   @Get('search')
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -153,7 +190,7 @@ export class OrdersController {
     @Param('itemId') itemId: string,
     @Body('status') status: OrderItemStatus,
   ) {
-    return this.ordersService.updateItemStatus(user.tenantId, id, itemId, status);
+    return this.ordersService.updateItemStatus(user.tenantId, id, itemId, status, user.role);
   }
 
   // 11. Mark free (item or entire order)

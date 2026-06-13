@@ -12,6 +12,7 @@ export enum CustomerRequestType {
 
 export enum CustomerRequestStatus {
   PENDING = 'PENDING',
+  ACKNOWLEDGED = 'ACKNOWLEDGED',
   DONE = 'DONE',
   CANCELLED = 'CANCELLED',
 }
