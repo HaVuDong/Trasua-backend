@@ -1,5 +1,6 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, UseGuards, Res } from '@nestjs/common';
-import { Response } from 'express';
+import { Body, Controller, Delete, Get, Param, Post, Put, Res, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import type { Response } from 'express';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { InventoryService } from './inventory.service';
 import { CreateItemDto } from './dto/create-item.dto';
 import { CreateImportDto } from './dto/create-import.dto';
@@ -77,6 +78,23 @@ export class InventoryController {
 
     await workbook.xlsx.write(res);
     res.end();
+  }
+
+  @Get('items/import-template')
+  @Roles(Role.ADMIN, Role.MANAGER)
+  async downloadImportTemplate(@Res() res: Response) {
+    const buffer = await this.inventoryService.buildItemsImportTemplate();
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=inventory_import_template.xlsx');
+    res.send(buffer);
+  }
+
+  @Post('items/import-excel')
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 2 * 1024 * 1024 } }))
+  importItemsFromExcel(@CurrentUser() user: any, @UploadedFile() file: any) {
+    return this.inventoryService.importItemsFromExcel(user.tenantId, file, user.userId);
   }
 
   @Get('items/:id')
