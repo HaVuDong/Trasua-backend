@@ -54,7 +54,8 @@ export class AuthController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.SYSTEM_OWNER, Role.ADMIN, Role.MANAGER)
   async generateDeviceOtp(@CurrentUser() user: any, @Param('userId') targetUserId: string) {
-    const result = await this.authService.generateOtpForUser(user.tenantId, targetUserId);
+    const tenantScope = user.role === Role.SYSTEM_OWNER ? undefined : user.tenantId;
+    const result = await this.authService.generateOtpForUser(tenantScope, targetUserId);
     return {
       message: 'OTP da duoc gui den email tai khoan. Hieu luc trong 15 phut.',
       ...(result.devOtp ? { devOtp: result.devOtp } : {}),

@@ -9,7 +9,7 @@ import { CreatePayosPaymentDto } from './dto/create-payos-payment.dto';
 import { Table, TableDocument, TableStatus } from '../tables/schemas/table.schema';
 import { InventoryItem, InventoryItemDocument, ItemStatus } from '../inventory/schemas/inventory.schema';
 import { InventoryService } from '../inventory/inventory.service';
-import { Tenant, TenantDocument } from '../tenants/schemas/tenant.schema';
+import { Tenant, TenantDocument, TenantStatus, SubscriptionStatus } from '../tenants/schemas/tenant.schema';
 import { ChatGateway } from '../chat/chat.gateway';
 import { MenuItemAvailabilityResult, MenuService } from '../menu/menu.service';
 import { MenuItem, MenuItemDocument, MenuItemStatus } from '../menu/schemas/menu-item.schema';
@@ -109,6 +109,19 @@ export class OrdersService {
       throw new NotFoundException(message);
     }
     return new Types.ObjectId(tenantId);
+  }
+
+  private async assertTenantAcceptsPublicOrders(tenantObjectId: Types.ObjectId) {
+    const tenant = await this.tenantModel.findById(tenantObjectId).select('status subscription').lean().exec();
+    const subscription = tenant?.subscription;
+    const subscriptionStatusAllowed =
+      subscription?.status === SubscriptionStatus.TRIALING ||
+      subscription?.status === SubscriptionStatus.ACTIVE;
+    const endDateAllowed = subscription?.endDate ? new Date(subscription.endDate).getTime() >= Date.now() : false;
+
+    if (!tenant || tenant.status !== TenantStatus.ACTIVE || !subscriptionStatusAllowed || !endDateAllowed) {
+      throw new ForbiddenException('Cua hang tam ngung nhan don. Vui long lien he nhan vien.');
+    }
   }
 
   private getTableObjectId(table: TableDocument): Types.ObjectId {
@@ -234,7 +247,8 @@ export class OrdersService {
   }
 
   async getPublicMenu(tenantId: string) {
-    this.toPublicTenantObjectId(tenantId, 'Tenant not found');
+    const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Tenant not found');
+    await this.assertTenantAcceptsPublicOrders(tenantObjectId);
     const [menuItems, availabilityRows] = await Promise.all([
       this.menuService.findAllMenuItems(tenantId),
       this.menuService.getAvailability(tenantId, 1),
@@ -265,6 +279,7 @@ export class OrdersService {
 
   async getTableInfo(tenantId: string, qrToken: string) {
     const tenantObjectId = this.toPublicTenantObjectId(tenantId);
+    await this.assertTenantAcceptsPublicOrders(tenantObjectId);
     const table = await this.tableModel.findOne({
       tenantId: tenantObjectId,
       qrCodeToken: qrToken,
@@ -284,6 +299,7 @@ export class OrdersService {
 
   async getPublicOrderStatus(tenantId: string, orderId: string) {
     const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Order not found');
+    await this.assertTenantAcceptsPublicOrders(tenantObjectId);
     const order = await this.orderModel.findOne({
       _id: orderId,
       tenantId: tenantObjectId,
@@ -306,12 +322,14 @@ export class OrdersService {
 
   async getTableSessionSummary(tenantId: string, sessionId: string) {
     const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Table session not found');
+    await this.assertTenantAcceptsPublicOrders(tenantObjectId);
     const sessionObjectId = this.toObjectId(sessionId, 'Invalid table session');
     return this.buildTableSessionSummary(tenantObjectId, sessionObjectId);
   }
 
   async createCustomerRequest(tenantId: string, qrToken: string, dto: CreateCustomerRequestDto) {
     const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Invalid or expired QR code');
+    await this.assertTenantAcceptsPublicOrders(tenantObjectId);
     const requestType = dto?.type;
     if (!Object.values(CustomerRequestType).includes(requestType)) {
       throw new BadRequestException('Invalid customer request type');
@@ -365,6 +383,47 @@ export class OrdersService {
       payment = await this.ensurePayosPaymentForSession(tenantObjectId, tableSession, summary);
     }
 
+    const idempotentRequestTypes = [
+      CustomerRequestType.CALL_STAFF,
+      CustomerRequestType.PAY_CASH,
+      CustomerRequestType.PAY_TRANSFER,
+      CustomerRequestType.PRINT_BILL,
+    ];
+    if (idempotentRequestTypes.includes(requestType)) {
+      const existingRequest = await this.customerRequestModel.findOne({
+        tenantId: tenantObjectId,
+        tableId: table._id,
+        sessionId: tableSession._id,
+        type: requestType,
+        status: { $in: [CustomerRequestStatus.PENDING, CustomerRequestStatus.ACKNOWLEDGED] },
+      }).sort({ createdAt: -1 }).exec();
+
+      if (existingRequest) {
+        if (!payment && existingRequest.paymentId) {
+          const existingPayment = await this.customerPaymentModel.findById(existingRequest.paymentId).exec();
+          payment = existingPayment ? this.toPublicPaymentResponse(existingPayment) : null;
+        }
+
+        return {
+          _id: existingRequest._id.toString(),
+          type: existingRequest.type,
+          status: existingRequest.status,
+          paymentMethod: existingRequest.paymentMethod,
+          message: existingRequest.message,
+          tenantId,
+          tableId: table._id.toString(),
+          tableName: table.name,
+          sessionId: tableSession._id.toString(),
+          customerName: tableSession.customerName,
+          customerPhone: tableSession.customerPhone,
+          bill: summary.bill,
+          payment,
+          createdAt: (existingRequest as any).createdAt,
+          reused: true,
+        };
+      }
+    }
+
     const customerRequest = new this.customerRequestModel({
       tenantId: tenantObjectId,
       tableId: table._id,
@@ -404,6 +463,7 @@ export class OrdersService {
 
   async createPayosPayment(tenantId: string, dto: CreatePayosPaymentDto) {
     const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Table session not found');
+    await this.assertTenantAcceptsPublicOrders(tenantObjectId);
     const sessionObjectId = this.toObjectId(dto.sessionId, 'Invalid table session');
     const tableSession = await this.tableSessionModel.findOne({
       _id: sessionObjectId,
@@ -428,9 +488,15 @@ export class OrdersService {
     return this.ensurePayosPaymentForSession(tenantObjectId, tableSession, summary);
   }
 
-  async getCustomerPaymentStatus(paymentId: string) {
+  async getCustomerPaymentStatus(paymentId: string, tenantId: string, sessionId: string) {
     const paymentObjectId = this.toObjectId(paymentId, 'Payment not found');
-    const payment = await this.customerPaymentModel.findById(paymentObjectId).exec();
+    const tenantObjectId = this.toObjectId(tenantId, 'Payment not found');
+    const sessionObjectId = this.toObjectId(sessionId, 'Payment not found');
+    const payment = await this.customerPaymentModel.findOne({
+      _id: paymentObjectId,
+      tenantId: tenantObjectId,
+      sessionId: sessionObjectId,
+    }).exec();
     if (!payment) throw new NotFoundException('Payment not found');
     return this.toPublicPaymentResponse(payment);
   }
@@ -489,6 +555,7 @@ export class OrdersService {
 
   async createQrOrder(tenantId: string, qrToken: string, dto: CreateOrderDto): Promise<Order> {
     const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Invalid or expired QR code');
+    await this.assertTenantAcceptsPublicOrders(tenantObjectId);
     const table = await this.tableModel.findOne({
       tenantId: tenantObjectId,
       qrCodeToken: qrToken,
@@ -1229,8 +1296,11 @@ export class OrdersService {
   }
 
   async getTableBill(tenantId: string, tableId: string): Promise<any> {
+    const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Table bill not found');
+    await this.assertTenantAcceptsPublicOrders(tenantObjectId);
+
     const orders = await this.orderModel.find({
-      tenantId: new Types.ObjectId(tenantId),
+      tenantId: tenantObjectId,
       tableId: new Types.ObjectId(tableId),
       status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
     })
@@ -1620,8 +1690,6 @@ export class OrdersService {
     normalizedItems: NormalizedOrderInputItem[],
     baseItems?: any[],
   ): Promise<PreparedOrderItem[]> {
-    await this.menuService.findAllMenuItems(tenantId);
-
     const requestedIds = Array.from(new Set(normalizedItems.map((item) => item.requestedId)));
     const menuByRequestedId = await this.resolveMenuByRequestedIds(tenantId, requestedIds);
     const recipeByMenuId = await this.getActiveRecipeByMenuIds(

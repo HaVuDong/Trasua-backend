@@ -10,16 +10,41 @@ export enum TenantStatus {
   DELETED = 'DELETED',
 }
 
+export enum SubscriptionStatus {
+  TRIALING = 'TRIALING',
+  ACTIVE = 'ACTIVE',
+  PAST_DUE = 'PAST_DUE',
+  EXPIRED = 'EXPIRED',
+}
+
 @Schema({ _id: false })
 export class SubscriptionInfo {
   @Prop({ required: true })
   plan: string;
+
+  @Prop({ type: String, enum: SubscriptionStatus, default: SubscriptionStatus.ACTIVE })
+  status: SubscriptionStatus;
 
   @Prop({ required: true })
   startDate: Date;
 
   @Prop({ required: true })
   endDate: Date;
+
+  @Prop()
+  trialEndsAt?: Date;
+
+  @Prop({ default: 0 })
+  amount?: number;
+
+  @Prop({ default: 'VND' })
+  currency?: string;
+
+  @Prop({ default: 'MONTHLY' })
+  billingCycle?: string;
+
+  @Prop()
+  lastPaymentAt?: Date;
 }
 
 @Schema({ _id: false })

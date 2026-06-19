@@ -1,4 +1,5 @@
 import { Controller, Get, Post, Body, Param, Patch, UseGuards, Query } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
@@ -16,6 +17,7 @@ export class OrdersController {
 
   // 1. Public QR Order endpoint for customers (no auth required)
   @Post(':tenantId/qr/:qrToken')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   createQrOrder(
     @Param('tenantId') tenantId: string,
     @Param('qrToken') qrToken: string,
@@ -50,6 +52,7 @@ export class OrdersController {
 
   // 1e. Public customer support/payment request endpoint
   @Post(':tenantId/table-request/:qrToken')
+  @Throttle({ default: { limit: 6, ttl: 60_000 } })
   createCustomerRequest(
     @Param('tenantId') tenantId: string,
     @Param('qrToken') qrToken: string,
@@ -69,7 +72,7 @@ export class OrdersController {
   // 3. Active orders view
   @Get('active')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.ADMIN, Role.MANAGER, Role.USER, Role.KITCHEN)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
   findAllActive(@CurrentUser() user: any) {
     return this.ordersService.findAllActive(user.tenantId);
   }
@@ -132,7 +135,7 @@ export class OrdersController {
   // 5. Get orders by table (for customer view)
   @Get('table/:tableId')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.ADMIN, Role.MANAGER, Role.USER, Role.KITCHEN)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
   getOrdersByTable(@CurrentUser() user: any, @Param('tableId') tableId: string) {
     return this.ordersService.getOrdersByTable(user.tenantId, tableId);
   }
@@ -146,7 +149,7 @@ export class OrdersController {
   // 6. Get order detail
   @Get(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.ADMIN, Role.MANAGER, Role.USER, Role.KITCHEN)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
   findOne(@CurrentUser() user: any, @Param('id') id: string) {
     return this.ordersService.findOrderById(user.tenantId, id);
   }
@@ -170,7 +173,7 @@ export class OrdersController {
   // 9. Cancel item (2-minute rule)
   @Patch(':id/items/:itemId/cancel')
   @UseGuards(JwtAuthGuard, RolesGuard, IpWhitelistGuard)
-  @Roles(Role.ADMIN, Role.MANAGER, Role.USER, Role.KITCHEN)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
   cancelItem(
     @CurrentUser() user: any,
     @Param('id') id: string,

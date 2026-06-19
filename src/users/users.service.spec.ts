@@ -111,4 +111,30 @@ describe('UsersService role creation policy', () => {
 
     expect(userModel.findOne).toHaveBeenCalledWith({ email: 'used@example.com' });
   });
+
+  it('marks reset password as temporary and clears trusted device state', async () => {
+    const tenantId = new Types.ObjectId().toString();
+    const userId = new Types.ObjectId().toString();
+    const userDoc = {
+      passwordHash: 'old-hash',
+      mustChangePassword: false,
+      trustedDevices: [{ deviceId: 'trusted', userAgent: 'ua', ip: '1.1.1.1', lastLogin: new Date() }],
+      localOtpCode: '123456',
+      localOtpExpires: new Date(),
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    userModel.findOne.mockReturnValue({
+      exec: jest.fn().mockResolvedValue(userDoc),
+    });
+
+    const result = await service.resetPassword(tenantId, userId);
+
+    expect(result.tempPassword).toBeTruthy();
+    expect(userDoc.passwordHash).toBe('hashed-password');
+    expect(userDoc.mustChangePassword).toBe(true);
+    expect(userDoc.trustedDevices).toEqual([]);
+    expect(userDoc.localOtpCode).toBeUndefined();
+    expect(userDoc.localOtpExpires).toBeUndefined();
+    expect(userDoc.save).toHaveBeenCalled();
+  });
 });

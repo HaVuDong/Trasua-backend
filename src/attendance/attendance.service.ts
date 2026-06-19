@@ -1001,7 +1001,6 @@ export class AttendanceService {
 
     try {
       const job = await this.payrollQueue.add('calculate-payroll', { tenantId, month });
-      await this.calculatePayrollDirect(tenantId, month);
       return { jobId: job.id, status: 'QUEUED', message: `Payroll calculation job queued for month ${month}` };
     } catch (e) {
       console.warn('Queue addition failed. Falling back to synchronous calculation.', e);

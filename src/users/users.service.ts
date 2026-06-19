@@ -3,12 +3,17 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { User, UserDocument, Role, UserStatus } from './schemas/user.schema';
 import { CreateUserDto } from './dto/create-user.dto';
+import { Tenant, TenantDocument } from '../tenants/schemas/tenant.schema';
+import { getSaasPlan } from '../billing/saas-plans';
 // @ts-ignore
 import * as bcrypt from 'bcrypt';
 
 @Injectable()
 export class UsersService {
-  constructor(@InjectModel(User.name) private userModel: Model<UserDocument>) {}
+  constructor(
+    @InjectModel(User.name) private userModel: Model<UserDocument>,
+    @InjectModel(Tenant.name) private tenantModel?: Model<TenantDocument>,
+  ) {}
 
   private normalizeEmail(email?: string) {
     return (email || '').trim().toLowerCase();
@@ -34,12 +39,29 @@ export class UsersService {
     return Math.random().toString(36).slice(-10);
   }
 
+  private async assertStaffLimit(tenantId: string) {
+    if (!this.tenantModel) return;
+    const tenant = await this.tenantModel.findById(tenantId).select('subscription').lean().exec();
+    if (!tenant) throw new BadRequestException('Tenant not found');
+    const plan = getSaasPlan((tenant as any).subscription?.plan);
+    const activeUsers = await this.userModel.countDocuments({
+      tenantId: new Types.ObjectId(tenantId),
+      role: { $ne: Role.SYSTEM_OWNER },
+      status: { $ne: UserStatus.DELETED },
+    }).exec();
+
+    if (activeUsers >= plan.maxStaff) {
+      throw new BadRequestException(`Goi ${plan.id} chi cho phep toi da ${plan.maxStaff} tai khoan`);
+    }
+  }
+
   async create(tenantId: string, createUserDto: CreateUserDto, actorRole: Role): Promise<any> {
     if (!tenantId) {
       throw new BadRequestException('tenantId is required');
     }
 
     this.assertCanCreateRole(actorRole, createUserDto.role);
+    await this.assertStaffLimit(tenantId);
 
     const email = this.normalizeEmail(createUserDto.email);
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -137,12 +159,20 @@ export class UsersService {
 
     const tempPassword = Math.random().toString(36).slice(-8);
     user.passwordHash = await bcrypt.hash(tempPassword, 10);
+    user.mustChangePassword = true;
+    user.trustedDevices = [];
+    user.localOtpCode = undefined;
+    user.localOtpExpires = undefined;
     await user.save();
 
     return { tempPassword };
   }
 
   async changePassword(userId: string, oldPassword: string, newPassword: string): Promise<{ message: string }> {
+    if (!newPassword || newPassword.length < 8) {
+      throw new BadRequestException('New password must have at least 8 characters');
+    }
+
     const user = await this.userModel.findById(userId).exec();
     if (!user) throw new NotFoundException('User not found');
 
@@ -150,6 +180,7 @@ export class UsersService {
     if (!matches) throw new BadRequestException('Current password is incorrect');
 
     user.passwordHash = await bcrypt.hash(newPassword, 10);
+    user.mustChangePassword = false;
     await user.save();
 
     return { message: 'Password changed successfully' };

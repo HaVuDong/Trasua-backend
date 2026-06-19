@@ -15,7 +15,7 @@ export class MenuController {
   constructor(private readonly menuService: MenuService) {}
 
   @Get()
-  @Roles(Role.ADMIN, Role.MANAGER, Role.USER, Role.KITCHEN)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
   findAll(
     @CurrentUser() user: any,
     @Query('category') category?: string,
@@ -25,7 +25,7 @@ export class MenuController {
   }
 
   @Get('availability')
-  @Roles(Role.ADMIN, Role.MANAGER, Role.USER, Role.KITCHEN)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
   getAvailability(@CurrentUser() user: any, @Query('quantity') quantity?: string) {
     const normalizedQuantity = quantity ? Number(quantity) : 1;
     return this.menuService.getAvailability(user.tenantId, normalizedQuantity);
@@ -38,7 +38,7 @@ export class MenuController {
   }
 
   @Get(':id')
-  @Roles(Role.ADMIN, Role.MANAGER, Role.USER, Role.KITCHEN)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
   findOne(@CurrentUser() user: any, @Param('id') id: string) {
     return this.menuService.findMenuItemById(user.tenantId, id);
   }
@@ -56,7 +56,7 @@ export class MenuController {
   }
 
   @Get(':id/recipe')
-  @Roles(Role.ADMIN, Role.MANAGER, Role.USER, Role.KITCHEN)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
   getRecipe(@CurrentUser() user: any, @Param('id') id: string) {
     return this.menuService.getActiveRecipeForMenuItem(user.tenantId, id);
   }
@@ -68,7 +68,7 @@ export class MenuController {
   }
 
   @Post(':id/check-availability')
-  @Roles(Role.ADMIN, Role.MANAGER, Role.USER, Role.KITCHEN)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
   checkAvailability(@CurrentUser() user: any, @Param('id') id: string, @Body('quantity') quantity?: number) {
     return this.menuService.checkAvailability(user.tenantId, id, quantity || 1);
   }

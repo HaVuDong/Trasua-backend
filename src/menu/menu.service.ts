@@ -70,8 +70,6 @@ export class MenuService {
   }
 
   async findAllMenuItems(tenantId: string, filters?: { category?: string; search?: string; includeDeleted?: boolean }) {
-    await this.ensureMenuSeededFromInventory(tenantId);
-
     const query: any = {
       tenantId: new Types.ObjectId(tenantId),
     };
@@ -275,8 +273,6 @@ export class MenuService {
   }
 
   async getAvailability(tenantId: string, quantity = 1): Promise<MenuItemAvailabilityResult[]> {
-    await this.ensureMenuSeededFromInventory(tenantId);
-
     const normalizedQuantity = Number(quantity);
     if (!Number.isFinite(normalizedQuantity) || normalizedQuantity <= 0) {
       throw new BadRequestException('So luong kiem tra khong hop le');
@@ -417,59 +413,4 @@ export class MenuService {
     };
   }
 
-  private async ensureMenuSeededFromInventory(tenantId: string) {
-    const tenantObjectId = new Types.ObjectId(tenantId);
-    const existingCount = await this.menuItemModel.countDocuments({
-      tenantId: tenantObjectId,
-      status: { $ne: MenuItemStatus.DELETED },
-    });
-    if (existingCount > 0) return;
-
-    const inventoryItems = await this.inventoryModel.find({
-      tenantId: tenantObjectId,
-      status: { $ne: ItemStatus.DELETED },
-    }).exec();
-
-    if (inventoryItems.length === 0) return;
-
-    for (const inventoryItem of inventoryItems) {
-      const existed = await this.menuItemModel.findOne({
-        tenantId: tenantObjectId,
-        legacyInventoryItemId: inventoryItem._id,
-      }).exec();
-
-      if (existed) continue;
-
-      const menuItem = new this.menuItemModel({
-        tenantId: tenantObjectId,
-        name: inventoryItem.name,
-        category: inventoryItem.category,
-        description: undefined,
-        sellingPrice: inventoryItem.sellingPrice,
-        imageUrl: inventoryItem.imageUrl,
-        status: inventoryItem.status === ItemStatus.ACTIVE ? MenuItemStatus.ACTIVE : MenuItemStatus.HIDDEN,
-        legacyInventoryItemId: inventoryItem._id,
-      });
-
-      const savedMenuItem = await menuItem.save();
-
-      const recipe = new this.menuRecipeModel({
-        tenantId: tenantObjectId,
-        menuItemId: savedMenuItem._id,
-        ingredients: [
-          {
-            inventoryItemId: inventoryItem._id,
-            inventoryItemNameSnapshot: inventoryItem.name,
-            requiredQuantity: 1,
-            unitSnapshot: inventoryItem.unit,
-            isOptional: false,
-          },
-        ],
-        version: 1,
-        status: MenuRecipeStatus.ACTIVE,
-      });
-
-      await recipe.save();
-    }
-  }
 }

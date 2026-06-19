@@ -47,16 +47,16 @@ async function main() {
   loadEnvFile(path.resolve(process.cwd(), '.env'));
 
   const apiKey = (process.env.RESEND_API_KEY || '').trim();
-  const from = parseArg('from') || (process.env.RESEND_FROM || '').trim() || 'onboarding@resend.dev';
-  const to = parseArg('to') || (process.env.RESEND_TEST_TO || process.env.SMTP_USER || '').trim();
+  const from = parseArg('from') || (process.env.RESEND_FROM || '').trim();
+  const to = parseArg('to') || (process.env.RESEND_TEST_TO || '').trim();
 
-  if (!apiKey) {
-    console.error('[Resend test] RESEND_API_KEY is missing. Set it in backend/.env or the shell environment.');
+  if (!apiKey || !from) {
+    console.error('[Resend test] RESEND_API_KEY and RESEND_FROM are required. Set them in backend/.env or the shell environment.');
     process.exit(1);
   }
 
   if (!to) {
-    console.error('[Resend test] Recipient is missing. Set RESEND_TEST_TO or SMTP_USER, or pass --to=email@example.com.');
+    console.error('[Resend test] Recipient is missing. Set RESEND_TEST_TO or pass --to=email@example.com.');
     process.exit(1);
   }
 

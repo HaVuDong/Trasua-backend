@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Model, Types } from 'mongoose';
 import { InventoryItem, InventoryItemDocument, ItemStatus } from './schemas/inventory.schema';
 import { ImportTicket, ImportTicketDocument } from './schemas/import-ticket.schema';
+import { MenuItemRecipe, MenuItemRecipeDocument, MenuRecipeStatus } from '../menu/schemas/menu-item-recipe.schema';
 import { CreateItemDto } from './dto/create-item.dto';
 import { CreateImportDto } from './dto/create-import.dto';
 
@@ -26,6 +27,7 @@ export class InventoryService {
   constructor(
     @InjectModel(InventoryItem.name) private itemModel: Model<InventoryItemDocument>,
     @InjectModel(ImportTicket.name) private ticketModel: Model<ImportTicketDocument>,
+    @InjectModel(MenuItemRecipe.name) private menuRecipeModel: Model<MenuItemRecipeDocument>,
   ) {}
 
   async createItem(tenantId: string, dto: CreateItemDto): Promise<InventoryItem> {
@@ -61,6 +63,20 @@ export class InventoryService {
   }
 
   async deleteItem(tenantId: string, id: string): Promise<InventoryItem> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('Inventory item id is invalid');
+    }
+
+    const activeRecipe = await this.menuRecipeModel.findOne({
+      tenantId: new Types.ObjectId(tenantId),
+      status: MenuRecipeStatus.ACTIVE,
+      'ingredients.inventoryItemId': new Types.ObjectId(id),
+    }).select('_id menuItemId').lean().exec();
+
+    if (activeRecipe) {
+      throw new BadRequestException('Nguyen lieu dang duoc dung trong cong thuc menu. Vui long go khoi cong thuc truoc.');
+    }
+
     return this.updateItem(tenantId, id, { status: ItemStatus.DELETED });
   }
 
@@ -82,15 +98,38 @@ export class InventoryService {
 
     const savedTicket = await ticket.save();
 
-    // Update stocks and average costPrice
+    // Update stocks and weighted average costPrice
     for (const itemDto of dto.items) {
-      await this.itemModel.updateOne(
-        { _id: itemDto.itemId, tenantId: new Types.ObjectId(tenantId) },
-        { 
-          $inc: { stock: itemDto.quantity },
-          $set: { costPrice: itemDto.costPrice } // Simplify: set to latest costPrice
-        }
-      ).exec();
+      const item = await this.itemModel.findOne({
+        _id: itemDto.itemId,
+        tenantId: new Types.ObjectId(tenantId),
+        status: { $ne: ItemStatus.DELETED },
+      }).exec();
+
+      if (!item) {
+        throw new NotFoundException('Inventory item not found');
+      }
+
+      const currentStock = Number(item.stock || 0);
+      const currentCost = Number(item.costPrice || 0);
+      const incomingQuantity = Number(itemDto.quantity || 0);
+      const incomingCost = Number(itemDto.costPrice || 0);
+      if (!Number.isFinite(incomingQuantity) || incomingQuantity <= 0) {
+        throw new BadRequestException('Import quantity must be greater than 0');
+      }
+      if (!Number.isFinite(incomingCost) || incomingCost < 0) {
+        throw new BadRequestException('Import cost price must be non-negative');
+      }
+
+      const nextStock = currentStock + incomingQuantity;
+      const nextCost =
+        nextStock > 0
+          ? Number((((currentStock * currentCost) + (incomingQuantity * incomingCost)) / nextStock).toFixed(4))
+          : incomingCost;
+
+      item.stock = nextStock;
+      item.costPrice = nextCost;
+      await item.save();
     }
 
     return savedTicket;

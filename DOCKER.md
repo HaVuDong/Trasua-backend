@@ -37,23 +37,21 @@ USE_REDIS_MOCK=false
 
 Payroll calculation will run synchronously instead of through BullMQ.
 
-## Render: OTP Email (Resend API — recommended)
+## Render: OTP Email (Resend API only)
 
-Render blocks outbound SMTP ports (587, 465). Use **Resend API** which sends via HTTPS (port 443):
+The backend sends OTP email only through **Resend API** over HTTPS. SMTP is not used anywhere in the app.
 
-1. Sign up at [resend.com](https://resend.com) (free: 100 emails/day)
-2. Get your API key from Settings → API Keys
+1. Verify your sending domain in Resend.
+2. Get your API key from Resend Settings -> API Keys.
 3. Set these environment variables on Render:
 
 ```bash
 RESEND_API_KEY=re_xxxxxxxxxxxx
-RESEND_FROM=onboarding@resend.dev
+RESEND_FROM="TraSua POS <no-reply@your-verified-domain.com>"
 RESEND_TEST_TO=your-resend-account@gmail.com
 DISABLE_DEVICE_OTP=false
 AUTH_DISABLE_DEVICE_OTP=false
 ```
-
-> With the free plan, emails are sent from `onboarding@resend.dev`. To use a custom sender, verify your domain on Resend.
 
 You can test the Resend credentials locally before deploying:
 
@@ -61,13 +59,13 @@ You can test the Resend credentials locally before deploying:
 npm run test:resend
 ```
 
-By default this sends to `RESEND_TEST_TO`; if that is empty, it sends to `SMTP_USER`. You can also pass a recipient directly:
+By default this sends to `RESEND_TEST_TO`. You can also pass a recipient directly:
 
 ```bash
 npm run test:resend -- --to=your-resend-account@gmail.com
 ```
 
-In production, the backend requires `RESEND_API_KEY` for OTP email. It will not fall back to SMTP because Render blocks outbound SMTP ports.
+The backend requires both `RESEND_API_KEY` and `RESEND_FROM` for OTP email. It does not fall back to SMTP or dev OTP.
 
 ## Render: Disable OTP (demo only)
 

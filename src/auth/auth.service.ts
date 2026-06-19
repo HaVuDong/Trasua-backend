@@ -314,8 +314,12 @@ export class AuthService {
     return this.buildLoginResponse(userDoc);
   }
 
-  async generateOtpForUser(tenantId: string, targetUserId: string): Promise<{ delivered: boolean; devOtp?: string }> {
-    const user = await this.userModel.findOne({ _id: targetUserId, tenantId: new Types.ObjectId(tenantId) }).exec();
+  async generateOtpForUser(tenantId: string | undefined, targetUserId: string): Promise<{ delivered: boolean; devOtp?: string }> {
+    const query: Record<string, unknown> = { _id: targetUserId };
+    if (tenantId) {
+      query.tenantId = new Types.ObjectId(tenantId);
+    }
+    const user = await this.userModel.findOne(query).exec();
     if (!user) throw new UnauthorizedException('User not found');
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();

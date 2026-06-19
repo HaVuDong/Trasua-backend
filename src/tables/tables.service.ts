@@ -3,7 +3,11 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Table, TableDocument, TableStatus } from './schemas/table.schema';
 import { Order, OrderDocument, OrderStatus } from '../orders/schemas/order.schema';
+import { TableSession, TableSessionDocument, TableSessionStatus } from '../orders/schemas/table-session.schema';
 import { CreateTableDto } from './dto/create-table.dto';
+import { Tenant, TenantDocument } from '../tenants/schemas/tenant.schema';
+import { MenuItem, MenuItemDocument, MenuItemStatus } from '../menu/schemas/menu-item.schema';
+import { getSaasPlan } from '../billing/saas-plans';
 import * as crypto from 'crypto';
 
 @Injectable()
@@ -11,6 +15,9 @@ export class TablesService {
   constructor(
     @InjectModel(Table.name) private tableModel: Model<TableDocument>,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
+    @InjectModel(TableSession.name) private tableSessionModel: Model<TableSessionDocument>,
+    @InjectModel(Tenant.name) private tenantModel: Model<TenantDocument>,
+    @InjectModel(MenuItem.name) private menuItemModel: Model<MenuItemDocument>,
   ) {}
 
   private normalizeTableNumber(rawValue: unknown): string {
@@ -98,8 +105,40 @@ export class TablesService {
     }
   }
 
+  private async assertTableLimit(tenantId: string) {
+    const tenant = await this.tenantModel.findById(tenantId).select('subscription').lean().exec();
+    if (!tenant) throw new BadRequestException('Tenant not found');
+    const plan = getSaasPlan((tenant as any).subscription?.plan);
+    const tableCount = await this.tableModel.countDocuments({ tenantId: new Types.ObjectId(tenantId) }).exec();
+
+    if (tableCount >= plan.maxTables) {
+      throw new BadRequestException(`Goi ${plan.id} chi cho phep toi da ${plan.maxTables} ban`);
+    }
+  }
+
+  private async assertCanMarkTableEmpty(tenantId: string, tableId: Types.ObjectId) {
+    const tenantObjectId = new Types.ObjectId(tenantId);
+    const [openSession, activeOrder] = await Promise.all([
+      this.tableSessionModel.findOne({
+        tenantId: tenantObjectId,
+        tableId,
+        status: TableSessionStatus.OPEN,
+      }).select('_id').lean().exec(),
+      this.orderModel.findOne({
+        tenantId: tenantObjectId,
+        tableId,
+        status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+      }).select('_id').lean().exec(),
+    ]);
+
+    if (openSession || activeOrder) {
+      throw new BadRequestException('Cannot mark table empty while it has an open session or active orders');
+    }
+  }
+
   async create(tenantId: string, createTableDto: CreateTableDto): Promise<Table> {
     const tableNumber = this.resolveTableNumberForValidation(createTableDto);
+    await this.assertTableLimit(tenantId);
     await this.assertUniqueTableNumber(tenantId, tableNumber);
 
     const qrCodeToken = crypto.randomUUID();
@@ -144,6 +183,15 @@ export class TablesService {
     delete updates.tenantId;
     delete updates.qrCodeToken;
 
+    if (updates.status !== undefined) {
+      if (!Object.values(TableStatus).includes(updates.status)) {
+        throw new BadRequestException('Trang thai ban khong hop le');
+      }
+      if (updates.status === TableStatus.EMPTY) {
+        await this.assertCanMarkTableEmpty(tenantId, existing._id as Types.ObjectId);
+      }
+    }
+
     const hasExplicitTableNumberChange = Object.prototype.hasOwnProperty.call(updates, 'tableNumber');
     const hasNameChange = Object.prototype.hasOwnProperty.call(updates, 'name');
     const hasTableNumberChangeRequest = hasExplicitTableNumberChange || hasNameChange;
@@ -185,20 +233,28 @@ export class TablesService {
   }
 
   async deleteTable(tenantId: string, id: string): Promise<{ message: string }> {
-    // Check no active orders on this table
-    const activeOrders = await this.orderModel.countDocuments({
-      tableId: new Types.ObjectId(id),
-      tenantId: new Types.ObjectId(tenantId),
-      status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
-    }).exec();
+    const tableObjectId = new Types.ObjectId(id);
+    const tenantObjectId = new Types.ObjectId(tenantId);
+    const [activeOrders, openSessions] = await Promise.all([
+      this.orderModel.countDocuments({
+        tableId: tableObjectId,
+        tenantId: tenantObjectId,
+        status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+      }).exec(),
+      this.tableSessionModel.countDocuments({
+        tableId: tableObjectId,
+        tenantId: tenantObjectId,
+        status: TableSessionStatus.OPEN,
+      }).exec(),
+    ]);
 
-    if (activeOrders > 0) {
-      throw new BadRequestException('Cannot delete table with active orders');
+    if (activeOrders > 0 || openSessions > 0) {
+      throw new BadRequestException('Cannot delete table with open sessions or active orders');
     }
 
     const deleted = await this.tableModel.findOneAndDelete({
-      _id: id,
-      tenantId: new Types.ObjectId(tenantId),
+      _id: tableObjectId,
+      tenantId: tenantObjectId,
     }).exec();
 
     if (!deleted) throw new NotFoundException('Table not found');
@@ -209,10 +265,33 @@ export class TablesService {
     const table = await this.tableModel.findOne({ _id: tableId, tenantId: new Types.ObjectId(tenantId) }).exec();
     if (!table) throw new NotFoundException('Table not found');
 
-    table.defaultItems = defaultItems.map(item => ({
-      itemId: new Types.ObjectId(item.itemId),
-      quantity: item.quantity,
-    }));
+    const normalizedItems = (defaultItems || []).map((item) => {
+      if (!Types.ObjectId.isValid(item.itemId)) {
+        throw new BadRequestException('Default item must be a valid menu item');
+      }
+      const quantity = Number(item.quantity);
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        throw new BadRequestException('Default item quantity must be greater than 0');
+      }
+      return {
+        itemId: new Types.ObjectId(item.itemId),
+        quantity,
+      };
+    });
+
+    const uniqueMenuItemIds = [...new Set(normalizedItems.map((item) => item.itemId.toString()))];
+    if (uniqueMenuItemIds.length > 0) {
+      const activeMenuItemCount = await this.menuItemModel.countDocuments({
+        _id: { $in: uniqueMenuItemIds.map((id) => new Types.ObjectId(id)) },
+        tenantId: new Types.ObjectId(tenantId),
+        status: MenuItemStatus.ACTIVE,
+      }).exec();
+      if (activeMenuItemCount !== uniqueMenuItemIds.length) {
+        throw new BadRequestException('Default items must be active menu items in this tenant');
+      }
+    }
+
+    table.defaultItems = normalizedItems;
 
     return table.save();
   }
@@ -246,6 +325,14 @@ export class TablesService {
   async updateStatus(tenantId: string, id: string, status: TableStatus): Promise<Table> {
     const table = await this.tableModel.findOne({ _id: id, tenantId: new Types.ObjectId(tenantId) }).exec();
     if (!table) throw new NotFoundException('Table not found');
+
+    if (!Object.values(TableStatus).includes(status)) {
+      throw new BadRequestException('Trang thai ban khong hop le');
+    }
+
+    if (status === TableStatus.EMPTY) {
+      await this.assertCanMarkTableEmpty(tenantId, table._id as Types.ObjectId);
+    }
 
     table.status = status;
     return table.save();

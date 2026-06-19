@@ -23,7 +23,7 @@ export class InventoryController {
   }
 
   @Get('items')
-  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
+  @Roles(Role.ADMIN, Role.MANAGER)
   findAllItems(@CurrentUser() user: any) {
     return this.inventoryService.findAllItems(user.tenantId);
   }
@@ -80,7 +80,7 @@ export class InventoryController {
   }
 
   @Get('items/:id')
-  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
+  @Roles(Role.ADMIN, Role.MANAGER)
   findOneItem(@CurrentUser() user: any, @Param('id') id: string) {
     return this.inventoryService.findOneItem(user.tenantId, id);
   }

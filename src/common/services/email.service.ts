@@ -1,6 +1,5 @@
 import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import * as nodemailer from 'nodemailer';
 import { Resend } from 'resend';
 
 @Injectable()
@@ -23,17 +22,8 @@ export class EmailService {
     return `${localPart.slice(0, 2)}***@${domain}`;
   }
 
-  private hasSmtpConfig() {
-    return Boolean(
-      this.getConfig('SMTP_HOST') &&
-        this.getConfig('SMTP_PORT') &&
-        this.getConfig('SMTP_USER') &&
-        this.getConfig('SMTP_PASS'),
-    );
-  }
-
   private hasResendConfig() {
-    return Boolean(this.getConfig('RESEND_API_KEY'));
+    return Boolean(this.getConfig('RESEND_API_KEY') && this.getConfig('RESEND_FROM'));
   }
 
   private isProduction() {
@@ -59,17 +49,28 @@ export class EmailService {
     return this.isDeviceOtpDisabled();
   }
 
-  private buildOtpEmailContent(email: string, otp: string, name?: string) {
+  private buildOtpEmailContent(email: string, otp: string, name?: string, purpose: 'device' | 'signup' = 'device') {
+    if (purpose === 'signup') {
+      return {
+        subject: 'Ma OTP dang ky cua hang TraSua POS',
+        text: `Xin chao ${name || email},\n\nMa OTP xac minh dang ky cua hang cua ban la: ${otp}\nMa co hieu luc trong 15 phut.`,
+      };
+    }
+
     return {
       subject: 'Ma OTP dang nhap TraSua POS',
       text: `Xin chao ${name || email},\n\nMa OTP dang nhap cua ban la: ${otp}\nMa co hieu luc trong 15 phut.`,
     };
   }
 
-  private async sendViaResend(email: string, otp: string, name?: string): Promise<void> {
+  private async sendViaResend(email: string, otp: string, name?: string, purpose: 'device' | 'signup' = 'device'): Promise<void> {
     const apiKey = this.getConfig('RESEND_API_KEY');
-    const from = this.getConfig('RESEND_FROM') || 'onboarding@resend.dev';
-    const { subject, text } = this.buildOtpEmailContent(email, otp, name);
+    const from = this.getConfig('RESEND_FROM');
+    if (!apiKey || !from) {
+      throw new ServiceUnavailableException('RESEND_API_KEY va RESEND_FROM la bat buoc de gui OTP.');
+    }
+
+    const { subject, text } = this.buildOtpEmailContent(email, otp, name, purpose);
 
     const resend = new Resend(apiKey);
     const { data, error } = await resend.emails.send({ from, to: email, subject, text });
@@ -84,61 +85,33 @@ export class EmailService {
     );
   }
 
-  private async sendViaSmtp(email: string, otp: string, name?: string): Promise<void> {
-    const port = Number(this.getConfig('SMTP_PORT'));
-    const transporter = nodemailer.createTransport({
-      host: this.getConfig('SMTP_HOST'),
-      port,
-      secure: port === 465,
-      connectionTimeout: Number(this.getConfig('SMTP_CONNECTION_TIMEOUT_MS') || 5000),
-      greetingTimeout: Number(this.getConfig('SMTP_GREETING_TIMEOUT_MS') || 5000),
-      socketTimeout: Number(this.getConfig('SMTP_SOCKET_TIMEOUT_MS') || 8000),
-      auth: {
-        user: this.getConfig('SMTP_USER'),
-        pass: this.getConfig('SMTP_PASS'),
-      },
-    });
-
-    const { subject, text } = this.buildOtpEmailContent(email, otp, name);
-
-    await transporter.sendMail({
-      from: this.getConfig('SMTP_FROM') || this.getConfig('SMTP_USER'),
-      to: email,
-      subject,
-      text,
-    });
-  }
-
   async sendDeviceOtp(email: string, otp: string, name?: string): Promise<{ delivered: boolean; devOtp?: string }> {
     if (!email) {
       throw new ServiceUnavailableException('Tai khoan chua co email de nhan OTP');
     }
 
-    // Priority: Resend API works on Render because it uses HTTPS instead of blocked SMTP ports.
     if (this.hasResendConfig()) {
       await this.sendViaResend(email, otp, name);
       return { delivered: true };
     }
 
-    if (this.isProduction()) {
-      throw new ServiceUnavailableException(
-        'RESEND_API_KEY chua duoc cau hinh. Production deploy phai dung Resend API de gui OTP.',
-      );
+    throw new ServiceUnavailableException(
+      'RESEND_API_KEY hoac RESEND_FROM chua duoc cau hinh. He thong chi gui OTP qua Resend.',
+    );
+  }
+
+  async sendSignupOtp(email: string, otp: string, name?: string): Promise<{ delivered: boolean; devOtp?: string }> {
+    if (!email) {
+      throw new ServiceUnavailableException('Email dang ky la bat buoc de nhan OTP');
     }
 
-    // Local fallback only. Production deploys must fail loudly when Resend is missing.
-    if (this.hasSmtpConfig()) {
-      try {
-        await this.sendViaSmtp(email, otp, name);
-        return { delivered: true };
-      } catch (err: any) {
-        console.warn(`[SMTP] Failed in dev, falling back to devOtp: ${err.message || err}`);
-        console.warn(`[DEV OTP] ${email}: ${otp}`);
-        return { delivered: false, devOtp: otp };
-      }
+    if (this.hasResendConfig()) {
+      await this.sendViaResend(email, otp, name, 'signup');
+      return { delivered: true };
     }
 
-    console.warn(`[DEV OTP] ${email}: ${otp}`);
-    return { delivered: false, devOtp: otp };
+    throw new ServiceUnavailableException(
+      'RESEND_API_KEY hoac RESEND_FROM chua duoc cau hinh. He thong chi gui OTP qua Resend.',
+    );
   }
 }

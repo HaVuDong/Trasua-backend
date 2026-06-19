@@ -1,14 +1,17 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { Tenant, TenantDocument, TenantStatus } from './schemas/tenant.schema';
+import { Tenant, TenantDocument, TenantStatus, SubscriptionStatus } from './schemas/tenant.schema';
 import { User, UserDocument, Role, UserStatus } from '../users/schemas/user.schema';
 import { CreateTenantDto } from './dto/create-tenant.dto';
+import { getSaasPlan } from '../billing/saas-plans';
 // @ts-ignore
 import * as bcrypt from 'bcrypt';
 
 @Injectable()
-export class TenantsService {
+export class TenantsService implements OnModuleInit {
+  private readonly logger = new Logger(TenantsService.name);
+
   constructor(
     @InjectModel(Tenant.name) private tenantModel: Model<TenantDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
@@ -20,6 +23,52 @@ export class TenantsService {
 
   private generateTempPassword() {
     return Math.random().toString(36).slice(-10);
+  }
+
+  async onModuleInit() {
+    await this.backfillMissingSubscriptions();
+  }
+
+  private async backfillMissingSubscriptions() {
+    const now = new Date();
+    const endDate = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const plan = getSaasPlan('PRO');
+    const result = await this.tenantModel.updateMany(
+      {
+        $or: [
+          { subscription: { $exists: false } },
+          { 'subscription.plan': { $exists: false } },
+          { 'subscription.endDate': { $exists: false } },
+        ],
+      },
+      {
+        $set: {
+          status: TenantStatus.ACTIVE,
+          subscription: {
+            plan: plan.id,
+            status: SubscriptionStatus.ACTIVE,
+            startDate: now,
+            endDate,
+            amount: plan.priceMonthly,
+            currency: plan.currency,
+            billingCycle: plan.billingCycle,
+            lastPaymentAt: now,
+          },
+        },
+        $push: {
+          paymentHistory: {
+            date: now,
+            amount: 0,
+            durationMonths: 1,
+            notes: 'Automatic legacy subscription backfill',
+          },
+        },
+      },
+    ).exec();
+
+    if (result.modifiedCount > 0) {
+      this.logger.warn(`Backfilled subscription for ${result.modifiedCount} legacy tenant(s).`);
+    }
   }
 
   async createTenant(createTenantDto: CreateTenantDto): Promise<any> {
@@ -54,6 +103,7 @@ export class TenantsService {
     const startDate = new Date();
     const endDate = new Date();
     endDate.setMonth(endDate.getMonth() + (createTenantDto.subscriptionDurationMonths || 1));
+    const plan = getSaasPlan(createTenantDto.subscriptionPlan);
 
     const newTenant = new this.tenantModel({
       name: createTenantDto.name,
@@ -64,9 +114,14 @@ export class TenantsService {
       phone: tenantPhone,
       status: createTenantDto.status || TenantStatus.ACTIVE,
       subscription: {
-        plan: createTenantDto.subscriptionPlan || 'BASIC',
+        plan: plan.id,
+        status: SubscriptionStatus.ACTIVE,
         startDate,
         endDate,
+        amount: plan.priceMonthly,
+        currency: plan.currency,
+        billingCycle: plan.billingCycle,
+        lastPaymentAt: startDate,
       },
       paymentHistory: [{
         date: startDate,
@@ -189,9 +244,15 @@ export class TenantsService {
 
     baseDate.setMonth(baseDate.getMonth() + months);
     tenant.subscription.endDate = baseDate;
+    tenant.subscription.status = SubscriptionStatus.ACTIVE;
+    tenant.subscription.lastPaymentAt = new Date();
+    const plan = getSaasPlan(tenant.subscription.plan);
+    tenant.subscription.amount = plan.priceMonthly;
+    tenant.subscription.currency = plan.currency;
+    tenant.subscription.billingCycle = plan.billingCycle;
 
     // If expired, reactivate
-    if (tenant.status === TenantStatus.EXPIRED) {
+    if (tenant.status === TenantStatus.EXPIRED || tenant.status === TenantStatus.SUSPENDED) {
       tenant.status = TenantStatus.ACTIVE;
     }
 
@@ -272,6 +333,10 @@ export class TenantsService {
 
     const tempPassword = Math.random().toString(36).slice(-8);
     admin.passwordHash = await bcrypt.hash(tempPassword, 10);
+    admin.mustChangePassword = true;
+    admin.trustedDevices = [];
+    admin.localOtpCode = undefined;
+    admin.localOtpExpires = undefined;
     await admin.save();
 
     return { tempPassword };

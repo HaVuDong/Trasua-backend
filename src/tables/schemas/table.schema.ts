@@ -12,7 +12,7 @@ export enum TableStatus {
 
 @Schema({ _id: false })
 export class DefaultItem {
-  @Prop({ type: Types.ObjectId, ref: 'InventoryItem', required: true })
+  @Prop({ type: Types.ObjectId, ref: 'MenuItem', required: true })
   itemId: Types.ObjectId;
 
   @Prop({ required: true })

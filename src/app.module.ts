@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { BullModule } from '@nestjs/bullmq';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { CommonModule } from './common/common.module';
@@ -16,6 +18,8 @@ import { ChatModule } from './chat/chat.module';
 import { ReportsModule } from './reports/reports.module';
 import { MenuModule } from './menu/menu.module';
 import { PaymentsModule } from './payments/payments.module';
+import { PublicSignupModule } from './public-signup/public-signup.module';
+import { BillingModule } from './billing/billing.module';
 
 function isRedisQueueDisabled() {
   return process.env.DISABLE_REDIS_QUEUE === 'true' || process.env.REDIS_DISABLED === 'true';
@@ -56,6 +60,24 @@ function getRedisConnectionOptions(configService: ConfigService) {
   };
 }
 
+function getThrottleTracker(req: Record<string, any>) {
+  const forwardedFor = req.headers?.['x-forwarded-for'];
+  const ipSource = (Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor) || req.socket?.remoteAddress || req.ip || 'unknown';
+  const ip = String(ipSource).replace('::ffff:', '');
+  const body = req.body || {};
+  const params = req.params || {};
+  const contextKey =
+    body.sessionId ||
+    body.signupId ||
+    body.admin?.email ||
+    body.tenantId ||
+    params.qrToken ||
+    params.paymentId ||
+    params.tenantId ||
+    '';
+  return `${ip}:${contextKey}`;
+}
+
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -69,6 +91,13 @@ function getRedisConnectionOptions(configService: ConfigService) {
       }),
       inject: [ConfigService],
     }),
+    ThrottlerModule.forRoot([
+      {
+        ttl: 60_000,
+        limit: 100,
+        getTracker: getThrottleTracker,
+      },
+    ]),
     ...(
       isRedisQueueDisabled()
         ? []
@@ -93,9 +122,17 @@ function getRedisConnectionOptions(configService: ConfigService) {
     AttendanceModule,
     ChatModule,
     ReportsModule,
+    BillingModule,
     PaymentsModule,
+    PublicSignupModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+  ],
 })
 export class AppModule {}
