@@ -244,7 +244,7 @@ export class PublicSignupService {
     signup.status = SignupRequestStatus.VERIFIED;
     await signup.save();
 
-    const { passwordHash: _passwordHash, localOtpCode, localOtpExpires, ...safeAdmin } = savedAdmin.toObject();
+    const { passwordHash: _passwordHash, localOtpCode, localOtpExpires, localOtpAttempts, ...safeAdmin } = savedAdmin.toObject();
     return {
       tenant: savedTenant,
       admin: safeAdmin,

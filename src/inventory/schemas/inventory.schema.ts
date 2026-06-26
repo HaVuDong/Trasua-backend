@@ -1,5 +1,9 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
+import {
+  integerVndValidator,
+  INTEGER_VND_MESSAGE,
+} from '../../common/domain/money';
 
 export type InventoryItemDocument = InventoryItem & Document;
 
@@ -33,10 +37,16 @@ export class InventoryItem {
   @Prop()
   imageUrl?: string;
 
-  @Prop({ required: true })
+  @Prop({
+    required: true,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   costPrice: number;
 
-  @Prop({ required: true })
+  @Prop({
+    required: true,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   sellingPrice: number;
 
   @Prop({ required: true, default: 0 })

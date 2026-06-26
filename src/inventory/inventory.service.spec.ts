@@ -1,6 +1,10 @@
 import { BadRequestException } from '@nestjs/common';
 import { Types } from 'mongoose';
 import { InventoryService } from './inventory.service';
+import {
+  InventoryAdjustmentStatus,
+  InventoryAdjustmentType,
+} from './schemas/inventory-adjustment.schema';
 // @ts-ignore
 import * as ExcelJS from 'exceljs';
 
@@ -28,7 +32,16 @@ function selectExecResult<T>(value: T) {
 async function createImportWorkbookBuffer(rows: any[][]) {
   const workbook = new ExcelJS.Workbook();
   const worksheet = workbook.addWorksheet('Nguyen lieu');
-  worksheet.addRow(['Ten nguyen lieu *', 'Don vi *', 'Danh muc *', 'Ton kho ban dau', 'Gia von don vi', 'Tong gia von ton kho', 'Nguong canh bao', 'Trang thai']);
+  worksheet.addRow([
+    'Ten nguyen lieu *',
+    'Don vi *',
+    'Danh muc *',
+    'Ton kho ban dau',
+    'Gia von don vi',
+    'Tong gia von ton kho',
+    'Nguong canh bao',
+    'Trang thai',
+  ]);
   rows.forEach((row) => worksheet.addRow(row));
   const buffer = await workbook.xlsx.writeBuffer();
   return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as ArrayBuffer);
@@ -43,11 +56,23 @@ describe('InventoryService stock and recipe safety', () => {
     insertMany: jest.Mock;
   };
   let ticketModel: jest.Mock;
+  let adjustmentModel: jest.Mock & {
+    find: jest.Mock;
+    findOne: jest.Mock;
+  };
+  let connection: any;
   let menuRecipeModel: {
     findOne: jest.Mock;
   };
 
   beforeEach(() => {
+    const mongoSession = {
+      withTransaction: jest.fn(async (callback) => callback()),
+      endSession: jest.fn(),
+    };
+    connection = {
+      startSession: jest.fn().mockResolvedValue(mongoSession),
+    };
     itemModel = jest.fn() as typeof itemModel;
     itemModel.find = jest.fn();
     itemModel.findOne = jest.fn();
@@ -57,19 +82,35 @@ describe('InventoryService stock and recipe safety', () => {
       ...payload,
       save: jest.fn().mockResolvedValue(payload),
     }));
+    adjustmentModel = jest.fn().mockImplementation((payload) => ({
+      ...payload,
+      save: jest.fn().mockResolvedValue(payload),
+    })) as typeof adjustmentModel;
+    adjustmentModel.find = jest.fn();
+    adjustmentModel.findOne = jest.fn();
     menuRecipeModel = {
       findOne: jest.fn(),
     };
 
-    service = new InventoryService(itemModel as never, ticketModel as never, menuRecipeModel as never);
+    service = new InventoryService(
+      connection,
+      itemModel as never,
+      ticketModel as never,
+      menuRecipeModel as never,
+      adjustmentModel as never,
+    );
   });
 
   it('blocks deleting an ingredient used by an active recipe', async () => {
     const tenantId = new Types.ObjectId().toString();
     const itemId = new Types.ObjectId().toString();
-    menuRecipeModel.findOne.mockReturnValue(selectLeanExecResult({ _id: new Types.ObjectId() }));
+    menuRecipeModel.findOne.mockReturnValue(
+      selectLeanExecResult({ _id: new Types.ObjectId() }),
+    );
 
-    await expect(service.deleteItem(tenantId, itemId)).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.deleteItem(tenantId, itemId)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
     expect(itemModel.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
@@ -102,7 +143,9 @@ describe('InventoryService stock and recipe safety', () => {
     ]);
 
     itemModel.find.mockReturnValue(selectExecResult([]));
-    itemModel.insertMany.mockResolvedValue([{ _id: itemId, name: 'Bot matcha' }]);
+    itemModel.insertMany.mockResolvedValue([
+      { _id: itemId, name: 'Bot matcha' },
+    ]);
 
     const result = await service.importItemsFromExcel(tenantId, {
       originalname: 'inventory.xlsx',
@@ -190,5 +233,92 @@ describe('InventoryService stock and recipe safety', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(itemModel.insertMany).not.toHaveBeenCalled();
     expect(itemDoc.save).not.toHaveBeenCalled();
+  });
+
+  it('creates pending inventory adjustments without changing stock', async () => {
+    const tenantId = new Types.ObjectId().toString();
+    const creatorId = new Types.ObjectId().toString();
+    const inventoryItemId = new Types.ObjectId().toString();
+    const itemDoc = {
+      _id: new Types.ObjectId(inventoryItemId),
+      stock: 20,
+      status: 'ACTIVE',
+    };
+    itemModel.findOne.mockReturnValue(execResult(itemDoc));
+
+    const adjustment = await service.createAdjustment(tenantId, creatorId, {
+      inventoryItemId,
+      type: InventoryAdjustmentType.COUNT_CORRECTION,
+      quantityAfter: 18,
+      reason: 'Kiem ke cuoi ngay',
+    });
+
+    expect(adjustment.status).toBe(InventoryAdjustmentStatus.PENDING);
+    expect(adjustment.quantityBefore).toBe(20);
+    expect(adjustment.quantityAfter).toBe(18);
+    expect(itemModel.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('approves inventory adjustments atomically', async () => {
+    const tenantId = new Types.ObjectId().toString();
+    const reviewerId = new Types.ObjectId().toString();
+    const adjustmentId = new Types.ObjectId().toString();
+    const inventoryItemId = new Types.ObjectId();
+    const adjustmentDoc = {
+      _id: new Types.ObjectId(adjustmentId),
+      tenantId: new Types.ObjectId(tenantId),
+      inventoryItemId,
+      status: InventoryAdjustmentStatus.PENDING,
+      quantityBefore: 20,
+      quantityAfter: 18,
+      save: jest.fn().mockImplementation(async function save(this: any) {
+        return this;
+      }),
+    };
+    adjustmentModel.findOne.mockReturnValueOnce({
+      session: jest.fn().mockReturnThis(),
+      exec: jest.fn().mockResolvedValue(adjustmentDoc),
+    });
+    itemModel.findOneAndUpdate.mockReturnValueOnce({
+      exec: jest.fn().mockResolvedValue({ _id: inventoryItemId, stock: 18 }),
+    });
+
+    const reviewed = await service.reviewAdjustment(
+      tenantId,
+      adjustmentId,
+      reviewerId,
+      { status: InventoryAdjustmentStatus.APPROVED },
+    );
+
+    expect(reviewed.status).toBe(InventoryAdjustmentStatus.APPROVED);
+    expect(itemModel.findOneAndUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ stock: 20 }),
+      { $set: { stock: 18 } },
+      expect.objectContaining({ new: true }),
+    );
+  });
+
+  it('blocks reviewing an adjustment twice', async () => {
+    const tenantId = new Types.ObjectId().toString();
+    const reviewerId = new Types.ObjectId().toString();
+    const adjustmentId = new Types.ObjectId().toString();
+    adjustmentModel.findOne
+      .mockReturnValueOnce({
+        session: jest.fn().mockReturnThis(),
+        exec: jest.fn().mockResolvedValue(null),
+      })
+      .mockReturnValueOnce({
+        session: jest.fn().mockReturnThis(),
+        exec: jest
+          .fn()
+          .mockResolvedValue({ status: InventoryAdjustmentStatus.APPROVED }),
+      });
+
+    await expect(
+      service.reviewAdjustment(tenantId, adjustmentId, reviewerId, {
+        status: InventoryAdjustmentStatus.APPROVED,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(itemModel.findOneAndUpdate).not.toHaveBeenCalled();
   });
 });

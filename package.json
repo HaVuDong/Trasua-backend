@@ -16,6 +16,8 @@
     "lint:check": "eslint \"{src,apps,libs,test}/**/*.ts\"",
     "test": "jest",
     "test:resend": "node scripts/test-resend-email.js",
+    "db:audit:prod-readiness": "node scripts/prod-readiness-db.js audit",
+    "db:migrate:indexes": "node scripts/prod-readiness-db.js migrate-indexes",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",

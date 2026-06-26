@@ -1,9 +1,34 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectConnection } from '@nestjs/mongoose';
 import { InjectModel } from '@nestjs/mongoose';
-import { ClientSession, Model, Types } from 'mongoose';
-import { InventoryItem, InventoryItemDocument, ItemCategory, ItemStatus } from './schemas/inventory.schema';
-import { ImportTicket, ImportTicketDocument } from './schemas/import-ticket.schema';
-import { MenuItemRecipe, MenuItemRecipeDocument, MenuRecipeStatus } from '../menu/schemas/menu-item-recipe.schema';
+import { ClientSession, Connection, Model, Types } from 'mongoose';
+import { assertBaseQuantityInteger } from '../common/domain/quantity';
+import { runTransactionSensitive } from '../common/domain/transaction';
+import {
+  InventoryItem,
+  InventoryItemDocument,
+  ItemCategory,
+  ItemStatus,
+} from './schemas/inventory.schema';
+import {
+  ImportTicket,
+  ImportTicketDocument,
+} from './schemas/import-ticket.schema';
+import {
+  InventoryAdjustment,
+  InventoryAdjustmentDocument,
+  InventoryAdjustmentStatus,
+  InventoryAdjustmentType,
+} from './schemas/inventory-adjustment.schema';
+import {
+  MenuItemRecipe,
+  MenuItemRecipeDocument,
+  MenuRecipeStatus,
+} from '../menu/schemas/menu-item-recipe.schema';
 import { CreateItemDto } from './dto/create-item.dto';
 import { CreateImportDto } from './dto/create-import.dto';
 // @ts-ignore
@@ -69,7 +94,11 @@ export interface InventoryExcelImportResult {
   errors: InventoryExcelImportError[];
 }
 
-const INVENTORY_IMPORT_HEADERS: Array<{ header: string; key: InventoryImportField; width: number }> = [
+const INVENTORY_IMPORT_HEADERS: Array<{
+  header: string;
+  key: InventoryImportField;
+  width: number;
+}> = [
   { header: 'Ten nguyen lieu *', key: 'name', width: 28 },
   { header: 'Don vi *', key: 'unit', width: 14 },
   { header: 'Danh muc *', key: 'category', width: 16 },
@@ -123,14 +152,24 @@ const IMPORT_HEADER_ALIASES: Record<string, InventoryImportField> = {
   trangthai: 'status',
 };
 
-const REQUIRED_IMPORT_FIELDS: InventoryImportField[] = ['name', 'unit', 'category'];
+const REQUIRED_IMPORT_FIELDS: InventoryImportField[] = [
+  'name',
+  'unit',
+  'category',
+];
 
 @Injectable()
 export class InventoryService {
   constructor(
-    @InjectModel(InventoryItem.name) private itemModel: Model<InventoryItemDocument>,
-    @InjectModel(ImportTicket.name) private ticketModel: Model<ImportTicketDocument>,
-    @InjectModel(MenuItemRecipe.name) private menuRecipeModel: Model<MenuItemRecipeDocument>,
+    @InjectConnection() private readonly connection: Connection,
+    @InjectModel(InventoryItem.name)
+    private itemModel: Model<InventoryItemDocument>,
+    @InjectModel(ImportTicket.name)
+    private ticketModel: Model<ImportTicketDocument>,
+    @InjectModel(MenuItemRecipe.name)
+    private menuRecipeModel: Model<MenuItemRecipeDocument>,
+    @InjectModel(InventoryAdjustment.name)
+    private adjustmentModel: Model<InventoryAdjustmentDocument>,
   ) {}
 
   async buildItemsImportTemplate(): Promise<Buffer> {
@@ -148,7 +187,11 @@ export class InventoryService {
 
     const headerRow = worksheet.getRow(1);
     headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF10B981' } };
+    headerRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF10B981' },
+    };
     headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
 
     worksheet.addRows([
@@ -198,22 +241,60 @@ export class InventoryService {
       { header: 'Mo ta', key: 'description', width: 72 },
     ];
     guide.addRows([
-      { field: 'Ten nguyen lieu *', description: 'Bat buoc. Neu ten da ton tai va don vi/danh muc khop, he thong se nhap them vao ton kho hien co.' },
-      { field: 'Don vi *', description: 'Bat buoc. Vi du: kg, g, lit, ml, goi, hop, chai. Nguyen lieu da co phai trung don vi moi duoc cong ton.' },
-      { field: 'Danh muc *', description: 'Bat buoc. Gia tri hop le: DRINK, FOOD, FRUIT, OTHER. Nguyen lieu da co phai trung danh muc moi duoc cong ton.' },
-      { field: 'So luong nhap / ton ban dau', description: 'Khong bat buoc. Nguyen lieu moi: ton ban dau. Nguyen lieu da co: so luong nhap them. Phai la so khong am.' },
-      { field: 'Gia von don vi', description: 'Khong bat buoc. Gia von cho 1 don vi nhap. Neu nhap them hang, he thong tinh lai gia von binh quan.' },
-      { field: 'Tong gia von ton kho', description: 'Tuy chon. Neu khong nhap Gia von don vi, he thong co the lay tong gia von chia cho so luong nhap.' },
-      { field: 'Nguong canh bao', description: 'Khong bat buoc. Nguyen lieu moi mac dinh 0. Nguyen lieu da co chi cap nhat khi cot nay co gia tri.' },
-      { field: 'Trang thai', description: 'Khong bat buoc. Gia tri hop le: ACTIVE hoac HIDDEN. Nguyen lieu da co chi cap nhat khi cot nay co gia tri.' },
+      {
+        field: 'Ten nguyen lieu *',
+        description:
+          'Bat buoc. Neu ten da ton tai va don vi/danh muc khop, he thong se nhap them vao ton kho hien co.',
+      },
+      {
+        field: 'Don vi *',
+        description:
+          'Bat buoc. Vi du: kg, g, lit, ml, goi, hop, chai. Nguyen lieu da co phai trung don vi moi duoc cong ton.',
+      },
+      {
+        field: 'Danh muc *',
+        description:
+          'Bat buoc. Gia tri hop le: DRINK, FOOD, FRUIT, OTHER. Nguyen lieu da co phai trung danh muc moi duoc cong ton.',
+      },
+      {
+        field: 'So luong nhap / ton ban dau',
+        description:
+          'Khong bat buoc. Nguyen lieu moi: ton ban dau. Nguyen lieu da co: so luong nhap them. Phai la so khong am.',
+      },
+      {
+        field: 'Gia von don vi',
+        description:
+          'Khong bat buoc. Gia von cho 1 don vi nhap. Neu nhap them hang, he thong tinh lai gia von binh quan.',
+      },
+      {
+        field: 'Tong gia von ton kho',
+        description:
+          'Tuy chon. Neu khong nhap Gia von don vi, he thong co the lay tong gia von chia cho so luong nhap.',
+      },
+      {
+        field: 'Nguong canh bao',
+        description:
+          'Khong bat buoc. Nguyen lieu moi mac dinh 0. Nguyen lieu da co chi cap nhat khi cot nay co gia tri.',
+      },
+      {
+        field: 'Trang thai',
+        description:
+          'Khong bat buoc. Gia tri hop le: ACTIVE hoac HIDDEN. Nguyen lieu da co chi cap nhat khi cot nay co gia tri.',
+      },
     ]);
     guide.getRow(1).font = { bold: true };
 
     const buffer = await workbook.xlsx.writeBuffer();
-    return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as ArrayBuffer);
+    return Buffer.isBuffer(buffer)
+      ? buffer
+      : Buffer.from(buffer as ArrayBuffer);
   }
 
-  async importItemsFromExcel(tenantId: string, file: any, creatorId?: string): Promise<InventoryExcelImportResult> {
+  async importItemsFromExcel(
+    tenantId: string,
+    file: any,
+    creatorId?: string,
+  ): Promise<InventoryExcelImportResult> {
     if (!file?.buffer) {
       throw new BadRequestException('Vui long chon file Excel can nhap');
     }
@@ -227,7 +308,9 @@ export class InventoryService {
     try {
       await workbook.xlsx.load(file.buffer as any);
     } catch {
-      throw new BadRequestException('Khong the doc file Excel. Vui long tai lai mau va kiem tra dinh dang file.');
+      throw new BadRequestException(
+        'Khong the doc file Excel. Vui long tai lai mau va kiem tra dinh dang file.',
+      );
     }
 
     const worksheet = workbook.worksheets[0];
@@ -236,7 +319,9 @@ export class InventoryService {
     }
 
     const headerMap = this.buildImportHeaderMap(worksheet.getRow(1));
-    const missingFields = REQUIRED_IMPORT_FIELDS.filter((field) => !headerMap.has(field));
+    const missingFields = REQUIRED_IMPORT_FIELDS.filter(
+      (field) => !headerMap.has(field),
+    );
     if (missingFields.length > 0) {
       throw new BadRequestException({
         message: 'File Excel thieu cot bat buoc',
@@ -251,15 +336,22 @@ export class InventoryService {
     const tenantObjectId = new Types.ObjectId(tenantId);
     const existingItems = await this.itemModel
       .find({ tenantId: tenantObjectId, status: { $ne: ItemStatus.DELETED } })
-      .select('name unit category stock costPrice sellingPrice minStockLevel status')
+      .select(
+        'name unit category stock costPrice sellingPrice minStockLevel status',
+      )
       .exec();
-    const existingByName = new Map(existingItems.map((item: any) => [this.normalizeComparableName(item.name), item] as const));
+    const existingByName = new Map(
+      existingItems.map(
+        (item: any) => [this.normalizeComparableName(item.name), item] as const,
+      ),
+    );
     const fileNames = new Set<string>();
 
     const parsedRows: ParsedInventoryImportRow[] = [];
     const errors: InventoryExcelImportError[] = [];
     const rowsToCreate: ParsedInventoryImportRow[] = [];
-    const rowsToUpdate: Array<{ parsed: ParsedInventoryImportRow; item: any }> = [];
+    const rowsToUpdate: Array<{ parsed: ParsedInventoryImportRow; item: any }> =
+      [];
 
     for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber += 1) {
       const row = worksheet.getRow(rowNumber);
@@ -267,7 +359,12 @@ export class InventoryService {
         continue;
       }
 
-      const parsed = this.parseInventoryImportRow(row, rowNumber, headerMap, errors);
+      const parsed = this.parseInventoryImportRow(
+        row,
+        rowNumber,
+        headerMap,
+        errors,
+      );
       if (!parsed) {
         continue;
       }
@@ -285,7 +382,10 @@ export class InventoryService {
 
       const existingItem = existingByName.get(normalizedName);
       if (existingItem) {
-        if (this.normalizeImportKey(existingItem.unit) !== this.normalizeImportKey(parsed.dto.unit)) {
+        if (
+          this.normalizeImportKey(existingItem.unit) !==
+          this.normalizeImportKey(parsed.dto.unit)
+        ) {
           errors.push({
             row: rowNumber,
             field: 'unit',
@@ -309,7 +409,9 @@ export class InventoryService {
     }
 
     if (parsedRows.length === 0 && errors.length === 0) {
-      throw new BadRequestException('File Excel chua co dong nguyen lieu nao de nhap');
+      throw new BadRequestException(
+        'File Excel chua co dong nguyen lieu nao de nhap',
+      );
     }
 
     if (parsedRows.length > 500) {
@@ -322,23 +424,29 @@ export class InventoryService {
 
     if (errors.length > 0) {
       throw new BadRequestException({
-        message: 'File Excel co loi. Vui long sua cac dong duoc bao va nhap lai.',
+        message:
+          'File Excel co loi. Vui long sua cac dong duoc bao va nhap lai.',
         errors,
       });
     }
 
     const resultRows: InventoryExcelImportResult['rows'] = [];
-    const ticketItems: Array<{ itemId: Types.ObjectId; quantity: number; costPrice: number }> = [];
+    const ticketItems: Array<{
+      itemId: Types.ObjectId;
+      quantity: number;
+      costPrice: number;
+    }> = [];
 
-    const insertedItems = rowsToCreate.length > 0
-      ? await this.itemModel.insertMany(
-          rowsToCreate.map((entry) => ({
-            ...entry.dto,
-            tenantId: tenantObjectId,
-          })),
-          { ordered: true },
-        )
-      : [];
+    const insertedItems =
+      rowsToCreate.length > 0
+        ? await this.itemModel.insertMany(
+            rowsToCreate.map((entry) => ({
+              ...entry.dto,
+              tenantId: tenantObjectId,
+            })),
+            { ordered: true },
+          )
+        : [];
 
     insertedItems.forEach((item: any, index: number) => {
       const parsed = rowsToCreate[index];
@@ -369,7 +477,10 @@ export class InventoryService {
       const nextStock = previousStock + importedQuantity;
       const nextCost =
         importedQuantity > 0 && nextStock > 0
-          ? Number((((previousStock * previousCost) + (importedQuantity * importedCost)) / nextStock).toFixed(4))
+          ? Math.round(
+              (previousStock * previousCost + importedQuantity * importedCost) /
+                nextStock,
+            )
           : previousCost;
 
       item.stock = nextStock;
@@ -420,14 +531,20 @@ export class InventoryService {
     return {
       createdCount: insertedItems.length,
       updatedCount: rowsToUpdate.length,
-      stockImportedQuantity: ticketItems.reduce((sum, item) => sum + item.quantity, 0),
+      stockImportedQuantity: ticketItems.reduce(
+        (sum, item) => sum + item.quantity,
+        0,
+      ),
       importTicketId,
       rows: resultRows.sort((a, b) => a.row - b.row),
       errors: [],
     };
   }
 
-  async createItem(tenantId: string, dto: CreateItemDto): Promise<InventoryItem> {
+  async createItem(
+    tenantId: string,
+    dto: CreateItemDto,
+  ): Promise<InventoryItem> {
     const item = new this.itemModel({
       ...dto,
       tenantId: new Types.ObjectId(tenantId),
@@ -435,7 +552,10 @@ export class InventoryService {
     return item.save();
   }
 
-  async findAllItems(tenantId: string, includeDeleted = false): Promise<InventoryItem[]> {
+  async findAllItems(
+    tenantId: string,
+    includeDeleted = false,
+  ): Promise<InventoryItem[]> {
     const query: any = { tenantId: new Types.ObjectId(tenantId) };
     if (!includeDeleted) {
       query.status = { $ne: ItemStatus.DELETED };
@@ -444,17 +564,25 @@ export class InventoryService {
   }
 
   async findOneItem(tenantId: string, id: string): Promise<InventoryItem> {
-    const item = await this.itemModel.findOne({ _id: id, tenantId: new Types.ObjectId(tenantId) }).exec();
+    const item = await this.itemModel
+      .findOne({ _id: id, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!item) throw new NotFoundException('Inventory item not found');
     return item;
   }
 
-  async updateItem(tenantId: string, id: string, dto: any): Promise<InventoryItem> {
-    const updated = await this.itemModel.findOneAndUpdate(
-      { _id: id, tenantId: new Types.ObjectId(tenantId) },
-      { $set: dto },
-      { new: true },
-    ).exec();
+  async updateItem(
+    tenantId: string,
+    id: string,
+    dto: any,
+  ): Promise<InventoryItem> {
+    const updated = await this.itemModel
+      .findOneAndUpdate(
+        { _id: id, tenantId: new Types.ObjectId(tenantId) },
+        { $set: dto },
+        { new: true },
+      )
+      .exec();
     if (!updated) throw new NotFoundException('Inventory item not found');
     return updated;
   }
@@ -464,24 +592,34 @@ export class InventoryService {
       throw new BadRequestException('Inventory item id is invalid');
     }
 
-    const activeRecipe = await this.menuRecipeModel.findOne({
-      tenantId: new Types.ObjectId(tenantId),
-      status: MenuRecipeStatus.ACTIVE,
-      'ingredients.inventoryItemId': new Types.ObjectId(id),
-    }).select('_id menuItemId').lean().exec();
+    const activeRecipe = await this.menuRecipeModel
+      .findOne({
+        tenantId: new Types.ObjectId(tenantId),
+        status: MenuRecipeStatus.ACTIVE,
+        'ingredients.inventoryItemId': new Types.ObjectId(id),
+      })
+      .select('_id menuItemId')
+      .lean()
+      .exec();
 
     if (activeRecipe) {
-      throw new BadRequestException('Nguyen lieu dang duoc dung trong cong thuc menu. Vui long go khoi cong thuc truoc.');
+      throw new BadRequestException(
+        'Nguyen lieu dang duoc dung trong cong thuc menu. Vui long go khoi cong thuc truoc.',
+      );
     }
 
     return this.updateItem(tenantId, id, { status: ItemStatus.DELETED });
   }
 
-  async importStock(tenantId: string, creatorId: string, dto: CreateImportDto): Promise<ImportTicket> {
-    const ticketItems = dto.items.map(item => ({
+  async importStock(
+    tenantId: string,
+    creatorId: string,
+    dto: CreateImportDto,
+  ): Promise<ImportTicket> {
+    const ticketItems = dto.items.map((item) => ({
       itemId: new Types.ObjectId(item.itemId),
       quantity: item.quantity,
-      costPrice: item.costPrice,
+      costPrice: Math.round(Number(item.costPrice || 0)),
     }));
 
     const ticket = new this.ticketModel({
@@ -497,11 +635,13 @@ export class InventoryService {
 
     // Update stocks and weighted average costPrice
     for (const itemDto of dto.items) {
-      const item = await this.itemModel.findOne({
-        _id: itemDto.itemId,
-        tenantId: new Types.ObjectId(tenantId),
-        status: { $ne: ItemStatus.DELETED },
-      }).exec();
+      const item = await this.itemModel
+        .findOne({
+          _id: itemDto.itemId,
+          tenantId: new Types.ObjectId(tenantId),
+          status: { $ne: ItemStatus.DELETED },
+        })
+        .exec();
 
       if (!item) {
         throw new NotFoundException('Inventory item not found');
@@ -510,7 +650,7 @@ export class InventoryService {
       const currentStock = Number(item.stock || 0);
       const currentCost = Number(item.costPrice || 0);
       const incomingQuantity = Number(itemDto.quantity || 0);
-      const incomingCost = Number(itemDto.costPrice || 0);
+      const incomingCost = Math.round(Number(itemDto.costPrice || 0));
       if (!Number.isFinite(incomingQuantity) || incomingQuantity <= 0) {
         throw new BadRequestException('Import quantity must be greater than 0');
       }
@@ -521,7 +661,10 @@ export class InventoryService {
       const nextStock = currentStock + incomingQuantity;
       const nextCost =
         nextStock > 0
-          ? Number((((currentStock * currentCost) + (incomingQuantity * incomingCost)) / nextStock).toFixed(4))
+          ? Math.round(
+              (currentStock * currentCost + incomingQuantity * incomingCost) /
+                nextStock,
+            )
           : incomingCost;
 
       item.stock = nextStock;
@@ -532,27 +675,192 @@ export class InventoryService {
     return savedTicket;
   }
 
-  async validateStockAvailability(tenantId: string, items: StockValidationItem[], session?: ClientSession): Promise<void> {
+  async createAdjustment(
+    tenantId: string,
+    createdBy: string,
+    dto: {
+      inventoryItemId: string;
+      type: InventoryAdjustmentType;
+      quantityAfter?: number;
+      delta?: number;
+      reason?: string;
+    },
+  ): Promise<InventoryAdjustment> {
+    if (!Object.values(InventoryAdjustmentType).includes(dto?.type)) {
+      throw new BadRequestException('Loai dieu chinh ton kho khong hop le');
+    }
+    if (!dto?.reason?.trim()) {
+      throw new BadRequestException('Can nhap ly do dieu chinh ton kho');
+    }
+
+    const tenantObjectId = new Types.ObjectId(tenantId);
+    const inventoryObjectId = new Types.ObjectId(dto.inventoryItemId);
+    const item = await this.itemModel
+      .findOne({
+        _id: inventoryObjectId,
+        tenantId: tenantObjectId,
+        status: { $ne: ItemStatus.DELETED },
+      })
+      .exec();
+    if (!item) throw new NotFoundException('Inventory item not found');
+
+    const quantityBefore = assertBaseQuantityInteger(
+      Number(item.stock || 0),
+      'quantityBefore',
+    );
+    const quantityAfter =
+      dto.quantityAfter !== undefined
+        ? assertBaseQuantityInteger(Number(dto.quantityAfter), 'quantityAfter')
+        : quantityBefore +
+          assertBaseQuantityInteger(Number(dto.delta || 0), 'delta');
+
+    assertBaseQuantityInteger(quantityAfter, 'quantityAfter');
+    if (quantityAfter < 0) {
+      throw new BadRequestException('Ton kho sau dieu chinh khong duoc am');
+    }
+
+    return new this.adjustmentModel({
+      tenantId: tenantObjectId,
+      inventoryItemId: inventoryObjectId,
+      type: dto.type,
+      quantityBefore,
+      quantityAfter,
+      delta: quantityAfter - quantityBefore,
+      reason: dto.reason.trim(),
+      status: InventoryAdjustmentStatus.PENDING,
+      createdBy: new Types.ObjectId(createdBy),
+    }).save();
+  }
+
+  async findAdjustments(
+    tenantId: string,
+    status?: InventoryAdjustmentStatus,
+  ): Promise<InventoryAdjustment[]> {
+    const query: any = { tenantId: new Types.ObjectId(tenantId) };
+    if (status) {
+      if (!Object.values(InventoryAdjustmentStatus).includes(status)) {
+        throw new BadRequestException('Trang thai dieu chinh khong hop le');
+      }
+      query.status = status;
+    }
+
+    return this.adjustmentModel
+      .find(query)
+      .populate('inventoryItemId')
+      .sort({ createdAt: -1 })
+      .exec();
+  }
+
+  async reviewAdjustment(
+    tenantId: string,
+    adjustmentId: string,
+    reviewedBy: string,
+    dto: {
+      status:
+        | InventoryAdjustmentStatus.APPROVED
+        | InventoryAdjustmentStatus.REJECTED;
+      reviewNote?: string;
+    },
+  ): Promise<InventoryAdjustment> {
+    if (
+      dto?.status !== InventoryAdjustmentStatus.APPROVED &&
+      dto?.status !== InventoryAdjustmentStatus.REJECTED
+    ) {
+      throw new BadRequestException(
+        'Chi co the APPROVED hoac REJECTED phieu dieu chinh',
+      );
+    }
+
+    return runTransactionSensitive(
+      this.connection,
+      async (session) => {
+        const tenantObjectId = new Types.ObjectId(tenantId);
+        const adjustmentObjectId = new Types.ObjectId(adjustmentId);
+        const adjustment = await this.adjustmentModel
+          .findOne({
+            _id: adjustmentObjectId,
+            tenantId: tenantObjectId,
+            status: InventoryAdjustmentStatus.PENDING,
+          })
+          .session(session)
+          .exec();
+
+        if (!adjustment) {
+          const existing = await this.adjustmentModel
+            .findOne({ _id: adjustmentObjectId, tenantId: tenantObjectId })
+            .session(session)
+            .exec();
+          if (existing) {
+            throw new BadRequestException('Phieu dieu chinh da duoc xu ly');
+          }
+          throw new NotFoundException('Khong tim thay phieu dieu chinh');
+        }
+
+        if (dto.status === InventoryAdjustmentStatus.APPROVED) {
+          const updatedItem = await this.itemModel
+            .findOneAndUpdate(
+              {
+                _id: adjustment.inventoryItemId,
+                tenantId: tenantObjectId,
+                status: { $ne: ItemStatus.DELETED },
+                stock: adjustment.quantityBefore,
+              },
+              { $set: { stock: adjustment.quantityAfter } },
+              { new: true, session },
+            )
+            .exec();
+          if (!updatedItem) {
+            throw new BadRequestException(
+              'Ton kho da thay doi sau khi tao phieu. Vui long tao phieu dieu chinh moi.',
+            );
+          }
+        }
+
+        adjustment.status = dto.status;
+        adjustment.reviewedBy = new Types.ObjectId(reviewedBy);
+        adjustment.reviewedAt = new Date();
+        adjustment.reviewNote = dto.reviewNote;
+        return adjustment.save({ session });
+      },
+      `review inventory adjustment ${adjustmentId}`,
+    );
+  }
+
+  async validateStockAvailability(
+    tenantId: string,
+    items: StockValidationItem[],
+    session?: ClientSession,
+  ): Promise<void> {
     const requestedByItem = new Map<string, number>();
 
     for (const entry of items) {
       const requestedQuantity = Number(entry.quantity);
       if (!Number.isFinite(requestedQuantity) || requestedQuantity <= 0) {
-        throw new BadRequestException(`Invalid quantity for item ${entry.itemId}`);
+        throw new BadRequestException(
+          `Invalid quantity for item ${entry.itemId}`,
+        );
       }
 
-      requestedByItem.set(entry.itemId, (requestedByItem.get(entry.itemId) || 0) + requestedQuantity);
+      requestedByItem.set(
+        entry.itemId,
+        (requestedByItem.get(entry.itemId) || 0) + requestedQuantity,
+      );
     }
 
     for (const [itemId, requestedQuantity] of requestedByItem.entries()) {
-      const item = await this.itemModel.findOne({
-        _id: itemId,
-        tenantId: new Types.ObjectId(tenantId),
-        status: ItemStatus.ACTIVE,
-      }).session(session || null).exec();
+      const item = await this.itemModel
+        .findOne({
+          _id: itemId,
+          tenantId: new Types.ObjectId(tenantId),
+          status: ItemStatus.ACTIVE,
+        })
+        .session(session || null)
+        .exec();
 
       if (!item) {
-        throw new NotFoundException(`Inventory item ${itemId} not found or unavailable`);
+        throw new NotFoundException(
+          `Inventory item ${itemId} not found or unavailable`,
+        );
       }
 
       if (item.stock < requestedQuantity) {
@@ -576,31 +884,40 @@ export class InventoryService {
   ): Promise<void> {
     const normalizedQuantity = Number(quantity);
     if (!Number.isFinite(normalizedQuantity) || normalizedQuantity <= 0) {
-      throw new BadRequestException(`Invalid deduction quantity for item ${itemId}`);
+      throw new BadRequestException(
+        `Invalid deduction quantity for item ${itemId}`,
+      );
     }
 
-    const updated = await this.itemModel.findOneAndUpdate(
-      {
-        _id: itemId,
-        tenantId: new Types.ObjectId(tenantId),
-        status: ItemStatus.ACTIVE,
-        stock: { $gte: normalizedQuantity },
-      },
-      { $inc: { stock: -normalizedQuantity } },
-      { new: true, session: options?.session },
-    ).exec();
+    const updated = await this.itemModel
+      .findOneAndUpdate(
+        {
+          _id: itemId,
+          tenantId: new Types.ObjectId(tenantId),
+          status: ItemStatus.ACTIVE,
+          stock: { $gte: normalizedQuantity },
+        },
+        { $inc: { stock: -normalizedQuantity } },
+        { new: true, session: options?.session },
+      )
+      .exec();
 
     if (updated) {
       return;
     }
 
-    const existingItem = await this.itemModel.findOne({
-      _id: itemId,
-      tenantId: new Types.ObjectId(tenantId),
-    }).session(options?.session || null).exec();
+    const existingItem = await this.itemModel
+      .findOne({
+        _id: itemId,
+        tenantId: new Types.ObjectId(tenantId),
+      })
+      .session(options?.session || null)
+      .exec();
 
     if (!existingItem) {
-      throw new NotFoundException(`Inventory item ${itemId} not found for deduction`);
+      throw new NotFoundException(
+        `Inventory item ${itemId} not found for deduction`,
+      );
     }
 
     if (existingItem.status !== ItemStatus.ACTIVE) {
@@ -625,43 +942,55 @@ export class InventoryService {
   }
 
   async getLowStockAlerts(tenantId: string): Promise<InventoryItem[]> {
-    return this.itemModel.find({
-      tenantId: new Types.ObjectId(tenantId),
-      status: ItemStatus.ACTIVE,
-      $expr: { $lt: ['$stock', '$minStockLevel'] }
-    }).exec();
+    return this.itemModel
+      .find({
+        tenantId: new Types.ObjectId(tenantId),
+        status: ItemStatus.ACTIVE,
+        $expr: { $lt: ['$stock', '$minStockLevel'] },
+      })
+      .exec();
   }
 
   async getInventoryStatus(tenantId: string): Promise<any> {
     const items = await this.findAllItems(tenantId);
-    const lowStock = items.filter(i => i.stock < i.minStockLevel && i.status === ItemStatus.ACTIVE);
-    const totalValue = items.reduce((sum, item) => sum + (item.stock * item.costPrice), 0);
+    const lowStock = items.filter(
+      (i) => i.stock < i.minStockLevel && i.status === ItemStatus.ACTIVE,
+    );
+    const totalValue = items.reduce(
+      (sum, item) => sum + item.stock * item.costPrice,
+      0,
+    );
 
     return {
       totalItems: items.length,
       lowStockCount: lowStock.length,
       totalValue,
       statusSummary: {
-        inStock: items.filter(i => i.stock >= i.minStockLevel).length,
+        inStock: items.filter((i) => i.stock >= i.minStockLevel).length,
         lowStock: lowStock.length,
-        outOfStock: items.filter(i => i.stock <= 0).length,
-      }
+        outOfStock: items.filter((i) => i.stock <= 0).length,
+      },
     };
   }
 
   async getImportHistory(tenantId: string): Promise<ImportTicket[]> {
-    return this.ticketModel.find({ tenantId: new Types.ObjectId(tenantId) })
+    return this.ticketModel
+      .find({ tenantId: new Types.ObjectId(tenantId) })
       .populate('items.itemId')
       .populate('createdBy', 'name email')
       .sort({ createdAt: -1 })
       .exec();
   }
 
-  private buildImportHeaderMap(headerRow: any): Map<InventoryImportField, number> {
+  private buildImportHeaderMap(
+    headerRow: any,
+  ): Map<InventoryImportField, number> {
     const headerMap = new Map<InventoryImportField, number>();
 
     headerRow.eachCell((cell: any, colNumber: number) => {
-      const normalizedHeader = this.normalizeImportKey(this.getCellText(cell.value));
+      const normalizedHeader = this.normalizeImportKey(
+        this.getCellText(cell.value),
+      );
       const field = IMPORT_HEADER_ALIASES[normalizedHeader];
       if (field && !headerMap.has(field)) {
         headerMap.set(field, colNumber);
@@ -671,7 +1000,10 @@ export class InventoryService {
     return headerMap;
   }
 
-  private isImportRowEmpty(row: any, headerMap: Map<InventoryImportField, number>): boolean {
+  private isImportRowEmpty(
+    row: any,
+    headerMap: Map<InventoryImportField, number>,
+  ): boolean {
     for (const colNumber of headerMap.values()) {
       if (this.getCellText(row.getCell(colNumber).value).trim()) {
         return false;
@@ -691,9 +1023,17 @@ export class InventoryService {
     const categoryText = this.getMappedCellText(row, headerMap, 'category');
     const statusText = this.getMappedCellText(row, headerMap, 'status');
     const stockText = this.getMappedCellText(row, headerMap, 'stock');
-    const minStockText = this.getMappedCellText(row, headerMap, 'minStockLevel');
+    const minStockText = this.getMappedCellText(
+      row,
+      headerMap,
+      'minStockLevel',
+    );
     const costPriceText = this.getMappedCellText(row, headerMap, 'costPrice');
-    const totalCostPriceText = this.getMappedCellText(row, headerMap, 'totalCostPrice');
+    const totalCostPriceText = this.getMappedCellText(
+      row,
+      headerMap,
+      'totalCostPrice',
+    );
     const provided = {
       stock: stockText !== '',
       minStockLevel: minStockText !== '',
@@ -703,10 +1043,18 @@ export class InventoryService {
     };
 
     if (!name) {
-      errors.push({ row: rowNumber, field: 'name', message: 'Ten nguyen lieu la bat buoc' });
+      errors.push({
+        row: rowNumber,
+        field: 'name',
+        message: 'Ten nguyen lieu la bat buoc',
+      });
     }
     if (!unit) {
-      errors.push({ row: rowNumber, field: 'unit', message: 'Don vi tinh la bat buoc' });
+      errors.push({
+        row: rowNumber,
+        field: 'unit',
+        message: 'Don vi tinh la bat buoc',
+      });
     }
 
     const category = this.parseImportCategory(categoryText);
@@ -731,7 +1079,12 @@ export class InventoryService {
 
     const stock = this.parseOptionalImportNumber(stockText, 0);
     if (stock === null || stock < 0) {
-      errors.push({ row: rowNumber, field: 'stock', message: 'Ton kho phai la so khong am', value: stockText });
+      errors.push({
+        row: rowNumber,
+        field: 'stock',
+        message: 'Ton kho phai la so khong am',
+        value: stockText,
+      });
     }
 
     const minStockLevel = this.parseOptionalImportNumber(minStockText, 0);
@@ -746,7 +1099,10 @@ export class InventoryService {
 
     let costPrice = this.parseOptionalImportNumber(costPriceText, 0);
     if ((costPrice === null || costPriceText === '') && totalCostPriceText) {
-      const totalCostPrice = this.parseOptionalImportNumber(totalCostPriceText, 0);
+      const totalCostPrice = this.parseOptionalImportNumber(
+        totalCostPriceText,
+        0,
+      );
       if (totalCostPrice === null || totalCostPrice < 0) {
         errors.push({
           row: rowNumber,
@@ -755,7 +1111,7 @@ export class InventoryService {
           value: totalCostPriceText,
         });
       } else if (stock && stock > 0) {
-        costPrice = Number((totalCostPrice / stock).toFixed(4));
+        costPrice = Math.round(totalCostPrice / stock);
       } else if (totalCostPrice > 0) {
         errors.push({
           row: rowNumber,
@@ -786,15 +1142,19 @@ export class InventoryService {
         category: category as ItemCategory,
         stock: stock as number,
         minStockLevel: minStockLevel as number,
-        costPrice: costPrice as number,
-        sellingPrice: costPrice as number,
+        costPrice: Math.round(costPrice as number),
+        sellingPrice: Math.round(costPrice as number),
         status: status as ItemStatus,
       },
       provided,
     };
   }
 
-  private getMappedCellText(row: any, headerMap: Map<InventoryImportField, number>, field: InventoryImportField): string {
+  private getMappedCellText(
+    row: any,
+    headerMap: Map<InventoryImportField, number>,
+    field: InventoryImportField,
+  ): string {
     const colNumber = headerMap.get(field);
     if (!colNumber) {
       return '';
@@ -871,7 +1231,10 @@ export class InventoryService {
     return map[key] || null;
   }
 
-  private parseOptionalImportNumber(value: string, defaultValue: number): number | null {
+  private parseOptionalImportNumber(
+    value: string,
+    defaultValue: number,
+  ): number | null {
     const raw = String(value || '').trim();
     if (!raw) {
       return defaultValue;
@@ -900,7 +1263,9 @@ export class InventoryService {
 
     if (lastComma >= 0) {
       const fractionLength = value.length - lastComma - 1;
-      return fractionLength === 3 ? value.replace(/,/g, '') : value.replace(',', '.');
+      return fractionLength === 3
+        ? value.replace(/,/g, '')
+        : value.replace(',', '.');
     }
 
     if (lastDot >= 0) {

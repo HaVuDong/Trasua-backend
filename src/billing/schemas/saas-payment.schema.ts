@@ -1,6 +1,13 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
-import { CustomerPaymentProvider, CustomerPaymentStatus } from '../../orders/schemas/customer-payment.schema';
+import {
+  integerVndValidator,
+  INTEGER_VND_MESSAGE,
+} from '../../common/domain/money';
+import {
+  CustomerPaymentProvider,
+  CustomerPaymentStatus,
+} from '../../orders/schemas/customer-payment.schema';
 
 export type SaasPaymentDocument = SaasPayment & Document;
 
@@ -15,13 +22,27 @@ export class SaasPayment {
   @Prop({ required: true, default: 1 })
   months: number;
 
-  @Prop({ required: true })
+  @Prop({
+    required: true,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   amount: number;
 
-  @Prop({ type: String, enum: CustomerPaymentProvider, required: true, default: CustomerPaymentProvider.PAYOS })
+  @Prop({
+    type: String,
+    enum: CustomerPaymentProvider,
+    required: true,
+    default: CustomerPaymentProvider.PAYOS,
+  })
   provider: CustomerPaymentProvider;
 
-  @Prop({ type: String, enum: CustomerPaymentStatus, required: true, default: CustomerPaymentStatus.PENDING, index: true })
+  @Prop({
+    type: String,
+    enum: CustomerPaymentStatus,
+    required: true,
+    default: CustomerPaymentStatus.PENDING,
+    index: true,
+  })
   status: CustomerPaymentStatus;
 
   @Prop({ required: true, index: true, unique: true })

@@ -9,12 +9,14 @@ import {
 } from '../orders/schemas/customer-payment.schema';
 import { getSaasPlan } from './saas-plans';
 import { SaasPayment, SaasPaymentDocument } from './schemas/saas-payment.schema';
+import { AuditLogService } from '../common/services/audit-log.service';
 
 @Injectable()
 export class BillingService {
   constructor(
     @InjectModel(Tenant.name) private tenantModel: Model<TenantDocument>,
     @InjectModel(SaasPayment.name) private saasPaymentModel: Model<SaasPaymentDocument>,
+    private auditLogService: AuditLogService,
   ) {}
 
   private assertPayosConfigured() {
@@ -208,11 +210,19 @@ export class BillingService {
     if (isPaid) {
       const wasAlreadyPaid = payment.status === CustomerPaymentStatus.PAID;
       payment.status = CustomerPaymentStatus.PAID;
-      payment.paidAt = new Date();
+      payment.paidAt = payment.paidAt || new Date();
       if (!wasAlreadyPaid) {
         await this.applyPaidSubscription(payment);
+        await this.auditLogService.logSystem(payment.tenantId.toString(), 'SAAS_PAYMENT_PAID', {
+          paymentId: payment._id.toString(),
+          orderCode: payment.orderCode,
+          amount: payment.amount,
+          plan: payment.plan,
+          months: payment.months,
+          provider: payment.provider,
+        });
       }
-    } else if (isCancelled) {
+    } else if (isCancelled && payment.status !== CustomerPaymentStatus.PAID) {
       payment.status = CustomerPaymentStatus.CANCELLED;
     }
 

@@ -8,8 +8,8 @@ export class AuditLog {
   @Prop({ type: Types.ObjectId, ref: 'Tenant', required: true, index: true })
   tenantId: Types.ObjectId;
 
-  @Prop({ type: Types.ObjectId, ref: 'User', required: true })
-  userId: Types.ObjectId;
+  @Prop({ type: Types.ObjectId, ref: 'User', required: false })
+  userId?: Types.ObjectId;
 
   @Prop({ required: true })
   action: string;

@@ -1,5 +1,10 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
+import {
+  integerVndValidator,
+  INTEGER_VND_MESSAGE,
+} from '../../common/domain/money';
+import { Permission } from '../../common/permissions/permission.enum';
 
 export type UserDocument = User & Document;
 
@@ -19,10 +24,14 @@ export enum UserStatus {
 
 @Schema({ _id: false })
 export class SalaryConfig {
-  @Prop()
+  @Prop({
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   baseHourly?: number;
 
-  @Prop()
+  @Prop({
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   baseShift?: number;
 
   @Prop({ default: 1.5 })
@@ -48,6 +57,15 @@ export class DeviceInfo {
 
   @Prop()
   trustMethod?: string;
+}
+
+@Schema({ _id: false })
+export class PermissionOverrides {
+  @Prop({ type: [String], enum: Permission, default: [] })
+  allow?: Permission[];
+
+  @Prop({ type: [String], enum: Permission, default: [] })
+  deny?: Permission[];
 }
 
 @Schema({ timestamps: true })
@@ -93,6 +111,9 @@ export class User {
   localOtpExpires?: Date;
 
   @Prop({ default: 0 })
+  localOtpAttempts?: number;
+
+  @Prop({ default: 0 })
   loginAttempts: number;
 
   @Prop()
@@ -100,11 +121,17 @@ export class User {
 
   @Prop({ default: false })
   mustChangePassword: boolean;
+
+  @Prop({ default: 1 })
+  permissionVersion: number;
+
+  @Prop({ type: PermissionOverrides, default: () => ({ allow: [], deny: [] }) })
+  permissionOverrides?: PermissionOverrides;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);
 
-UserSchema.pre('save', async function (this: any) {
+UserSchema.pre('save', function (this: UserDocument) {
   if (this.role !== Role.SYSTEM_OWNER && !this.tenantId) {
     throw new Error('tenantId is required for non-system owners');
   }

@@ -1,5 +1,9 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
+import {
+  integerVndValidator,
+  INTEGER_VND_MESSAGE,
+} from '../../common/domain/money';
 
 export type CustomerPaymentDocument = CustomerPayment & Document;
 
@@ -23,13 +27,29 @@ export class CustomerPayment {
   @Prop({ type: Types.ObjectId, ref: 'Table', required: true, index: true })
   tableId: Types.ObjectId;
 
-  @Prop({ type: Types.ObjectId, ref: 'TableSession', required: true, index: true })
+  @Prop({
+    type: Types.ObjectId,
+    ref: 'TableSession',
+    required: true,
+    index: true,
+  })
   sessionId: Types.ObjectId;
 
-  @Prop({ type: String, enum: CustomerPaymentProvider, required: true, default: CustomerPaymentProvider.PAYOS })
+  @Prop({
+    type: String,
+    enum: CustomerPaymentProvider,
+    required: true,
+    default: CustomerPaymentProvider.PAYOS,
+  })
   provider: CustomerPaymentProvider;
 
-  @Prop({ type: String, enum: CustomerPaymentStatus, required: true, default: CustomerPaymentStatus.PENDING, index: true })
+  @Prop({
+    type: String,
+    enum: CustomerPaymentStatus,
+    required: true,
+    default: CustomerPaymentStatus.PENDING,
+    index: true,
+  })
   status: CustomerPaymentStatus;
 
   @Prop({ required: true, index: true, unique: true })
@@ -44,7 +64,10 @@ export class CustomerPayment {
   @Prop()
   qrCode?: string;
 
-  @Prop({ required: true })
+  @Prop({
+    required: true,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   amount: number;
 
   @Prop({ required: true })
@@ -72,6 +95,7 @@ export class CustomerPayment {
   paidAt?: Date;
 }
 
-export const CustomerPaymentSchema = SchemaFactory.createForClass(CustomerPayment);
+export const CustomerPaymentSchema =
+  SchemaFactory.createForClass(CustomerPayment);
 
 CustomerPaymentSchema.index({ tenantId: 1, sessionId: 1, status: 1 });

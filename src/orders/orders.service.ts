@@ -1,18 +1,50 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ForbiddenException,
+  Logger,
+  Optional,
+} from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { createHmac } from 'crypto';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
-import { Order, OrderDocument, OrderStatus, OrderItemStatus } from './schemas/order.schema';
+import {
+  Order,
+  OrderDocument,
+  OrderStatus,
+  OrderItemStatus,
+  OrderItemCostSnapshot,
+} from './schemas/order.schema';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateCustomerRequestDto } from './dto/customer-request.dto';
 import { CreatePayosPaymentDto } from './dto/create-payos-payment.dto';
-import { Table, TableDocument, TableStatus } from '../tables/schemas/table.schema';
-import { InventoryItem, InventoryItemDocument, ItemStatus } from '../inventory/schemas/inventory.schema';
+import {
+  Table,
+  TableDocument,
+  TableStatus,
+} from '../tables/schemas/table.schema';
+import {
+  InventoryItem,
+  InventoryItemDocument,
+  ItemStatus,
+} from '../inventory/schemas/inventory.schema';
 import { InventoryService } from '../inventory/inventory.service';
-import { Tenant, TenantDocument, TenantStatus, SubscriptionStatus } from '../tenants/schemas/tenant.schema';
+import {
+  Tenant,
+  TenantDocument,
+  TenantStatus,
+  SubscriptionStatus,
+} from '../tenants/schemas/tenant.schema';
 import { ChatGateway } from '../chat/chat.gateway';
 import { MenuItemAvailabilityResult, MenuService } from '../menu/menu.service';
-import { MenuItem, MenuItemDocument, MenuItemStatus } from '../menu/schemas/menu-item.schema';
+import {
+  MenuItem,
+  MenuItemDocument,
+  MenuItemStatus,
+} from '../menu/schemas/menu-item.schema';
+import { AuditLogService } from '../common/services/audit-log.service';
+import { runTransactionSensitive } from '../common/domain/transaction';
 import {
   MenuItemRecipe,
   MenuItemRecipeDocument,
@@ -39,6 +71,12 @@ import {
   CustomerPaymentProvider,
   CustomerPaymentStatus,
 } from './schemas/customer-payment.schema';
+import { CashierService } from '../cashier/cashier.service';
+import { PaymentMethod } from '../common/domain/payment-method';
+import {
+  CashMovementSourceType,
+  CashMovementType,
+} from '../cashier/schemas/cash-movement.schema';
 
 type NormalizedOrderInputItem = {
   requestedId: string;
@@ -67,6 +105,7 @@ type PreparedOrderItem = {
     wastePercent?: number;
     isOptional?: boolean;
   }>;
+  costSnapshot?: OrderItemCostSnapshot;
 };
 
 type IngredientContributor = {
@@ -92,35 +131,60 @@ export class OrdersService {
     @InjectConnection() private readonly connection: Connection,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(Table.name) private tableModel: Model<TableDocument>,
-    @InjectModel(InventoryItem.name) private itemModel: Model<InventoryItemDocument>,
+    @InjectModel(InventoryItem.name)
+    private itemModel: Model<InventoryItemDocument>,
     @InjectModel(Tenant.name) private tenantModel: Model<TenantDocument>,
     @InjectModel(MenuItem.name) private menuItemModel: Model<MenuItemDocument>,
-    @InjectModel(MenuItemRecipe.name) private menuRecipeModel: Model<MenuItemRecipeDocument>,
-    @InjectModel(TableSession.name) private tableSessionModel: Model<TableSessionDocument>,
-    @InjectModel(CustomerRequest.name) private customerRequestModel: Model<CustomerRequestDocument>,
-    @InjectModel(CustomerPayment.name) private customerPaymentModel: Model<CustomerPaymentDocument>,
+    @InjectModel(MenuItemRecipe.name)
+    private menuRecipeModel: Model<MenuItemRecipeDocument>,
+    @InjectModel(TableSession.name)
+    private tableSessionModel: Model<TableSessionDocument>,
+    @InjectModel(CustomerRequest.name)
+    private customerRequestModel: Model<CustomerRequestDocument>,
+    @InjectModel(CustomerPayment.name)
+    private customerPaymentModel: Model<CustomerPaymentDocument>,
     private inventoryService: InventoryService,
     private menuService: MenuService,
     private chatGateway: ChatGateway,
+    private auditLogService: AuditLogService,
+    @Optional() private cashierService?: CashierService,
   ) {}
 
-  private toPublicTenantObjectId(tenantId: string, message = 'Invalid QR code') {
+  private toPublicTenantObjectId(
+    tenantId: string,
+    message = 'Invalid QR code',
+  ) {
     if (!Types.ObjectId.isValid(tenantId)) {
       throw new NotFoundException(message);
     }
     return new Types.ObjectId(tenantId);
   }
 
-  private async assertTenantAcceptsPublicOrders(tenantObjectId: Types.ObjectId) {
-    const tenant = await this.tenantModel.findById(tenantObjectId).select('status subscription').lean().exec();
+  private async assertTenantAcceptsPublicOrders(
+    tenantObjectId: Types.ObjectId,
+  ) {
+    const tenant = await this.tenantModel
+      .findById(tenantObjectId)
+      .select('status subscription')
+      .lean()
+      .exec();
     const subscription = tenant?.subscription;
     const subscriptionStatusAllowed =
       subscription?.status === SubscriptionStatus.TRIALING ||
       subscription?.status === SubscriptionStatus.ACTIVE;
-    const endDateAllowed = subscription?.endDate ? new Date(subscription.endDate).getTime() >= Date.now() : false;
+    const endDateAllowed = subscription?.endDate
+      ? new Date(subscription.endDate).getTime() >= Date.now()
+      : false;
 
-    if (!tenant || tenant.status !== TenantStatus.ACTIVE || !subscriptionStatusAllowed || !endDateAllowed) {
-      throw new ForbiddenException('Cua hang tam ngung nhan don. Vui long lien he nhan vien.');
+    if (
+      !tenant ||
+      tenant.status !== TenantStatus.ACTIVE ||
+      !subscriptionStatusAllowed ||
+      !endDateAllowed
+    ) {
+      throw new ForbiddenException(
+        'Cua hang tam ngung nhan don. Vui long lien he nhan vien.',
+      );
     }
   }
 
@@ -128,15 +192,25 @@ export class OrdersService {
     return table._id as Types.ObjectId;
   }
 
-  private async markTableServing(table: TableDocument, session?: ClientSession) {
-    if (table.status === TableStatus.EMPTY || table.status === TableStatus.CLEANING) {
+  private async markTableServing(
+    table: TableDocument,
+    session?: ClientSession,
+  ) {
+    if (
+      table.status === TableStatus.EMPTY ||
+      table.status === TableStatus.CLEANING
+    ) {
       table.status = TableStatus.SERVING;
       await table.save(session ? { session } : undefined);
     }
   }
 
   private isDuplicateKeyError(error: unknown): boolean {
-    return Boolean(error && typeof error === 'object' && (error as { code?: number }).code === 11000);
+    return Boolean(
+      error &&
+      typeof error === 'object' &&
+      (error as { code?: number }).code === 11000,
+    );
   }
 
   private async findOpenTableSession(
@@ -163,7 +237,11 @@ export class OrdersService {
     session?: ClientSession,
   ): Promise<TableSessionDocument> {
     const tableId = this.getTableObjectId(table);
-    const existingSession = await this.findOpenTableSession(tenantId, tableId, session);
+    const existingSession = await this.findOpenTableSession(
+      tenantId,
+      tableId,
+      session,
+    );
     if (existingSession) {
       existingSession.lastActivityAt = new Date();
       await existingSession.save(session ? { session } : undefined);
@@ -185,7 +263,11 @@ export class OrdersService {
     } catch (error) {
       if (!this.isDuplicateKeyError(error)) throw error;
 
-      const racedSession = await this.findOpenTableSession(tenantId, tableId, session);
+      const racedSession = await this.findOpenTableSession(
+        tenantId,
+        tableId,
+        session,
+      );
       if (!racedSession) throw error;
       savedSession = racedSession;
     }
@@ -207,12 +289,14 @@ export class OrdersService {
         throw new BadRequestException('Invalid table session');
       }
 
-      const requestedSession = await this.tableSessionModel.findOne({
-        _id: new Types.ObjectId(requestedSessionId),
-        tenantId,
-        tableId,
-        status: TableSessionStatus.OPEN,
-      }).exec();
+      const requestedSession = await this.tableSessionModel
+        .findOne({
+          _id: new Types.ObjectId(requestedSessionId),
+          tenantId,
+          tableId,
+          status: TableSessionStatus.OPEN,
+        })
+        .exec();
 
       if (!requestedSession) {
         throw new BadRequestException('Invalid or expired table session');
@@ -221,11 +305,20 @@ export class OrdersService {
       return requestedSession;
     }
 
-    return this.getOrCreateOpenTableSession(tenantId, table, qrCodeTokenSnapshot);
+    return this.getOrCreateOpenTableSession(
+      tenantId,
+      table,
+      qrCodeTokenSnapshot,
+    );
   }
 
-  private async closeOpenTableSessions(tenantId: string | Types.ObjectId, tableId: Types.ObjectId, session?: ClientSession) {
-    const tenantObjectId = typeof tenantId === 'string' ? new Types.ObjectId(tenantId) : tenantId;
+  private async closeOpenTableSessions(
+    tenantId: string | Types.ObjectId,
+    tableId: Types.ObjectId,
+    session?: ClientSession,
+  ) {
+    const tenantObjectId =
+      typeof tenantId === 'string' ? new Types.ObjectId(tenantId) : tenantId;
     const now = new Date();
     const query = this.tableSessionModel.updateMany(
       {
@@ -247,7 +340,10 @@ export class OrdersService {
   }
 
   async getPublicMenu(tenantId: string) {
-    const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Tenant not found');
+    const tenantObjectId = this.toPublicTenantObjectId(
+      tenantId,
+      'Tenant not found',
+    );
     await this.assertTenantAcceptsPublicOrders(tenantObjectId);
     const [menuItems, availabilityRows] = await Promise.all([
       this.menuService.findAllMenuItems(tenantId),
@@ -255,7 +351,9 @@ export class OrdersService {
     ]);
 
     const availabilityByMenuId = new Map<string, MenuItemAvailabilityResult>();
-    availabilityRows.forEach((row) => availabilityByMenuId.set(row.menuItemId, row));
+    availabilityRows.forEach((row) =>
+      availabilityByMenuId.set(row.menuItemId, row),
+    );
 
     return menuItems
       .filter((item) => item.status === MenuItemStatus.ACTIVE)
@@ -280,14 +378,21 @@ export class OrdersService {
   async getTableInfo(tenantId: string, qrToken: string) {
     const tenantObjectId = this.toPublicTenantObjectId(tenantId);
     await this.assertTenantAcceptsPublicOrders(tenantObjectId);
-    const table = await this.tableModel.findOne({
-      tenantId: tenantObjectId,
-      qrCodeToken: qrToken,
-    }).exec();
+    const table = await this.tableModel
+      .findOne({
+        tenantId: tenantObjectId,
+        qrCodeToken: qrToken,
+      })
+      .exec();
 
     if (!table) throw new NotFoundException('Invalid QR code');
-    if (table.isHidden) throw new BadRequestException('This table is currently unavailable');
-    const tableSession = await this.getOrCreateOpenTableSession(tenantObjectId, table, qrToken);
+    if (table.isHidden)
+      throw new BadRequestException('This table is currently unavailable');
+    const tableSession = await this.getOrCreateOpenTableSession(
+      tenantObjectId,
+      table,
+      qrToken,
+    );
     return {
       name: table.name,
       status: table.status,
@@ -298,12 +403,16 @@ export class OrdersService {
   }
 
   async getPublicOrderStatus(tenantId: string, orderId: string) {
-    const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Order not found');
+    const tenantObjectId = this.toPublicTenantObjectId(
+      tenantId,
+      'Order not found',
+    );
     await this.assertTenantAcceptsPublicOrders(tenantObjectId);
-    const order = await this.orderModel.findOne({
-      _id: orderId,
-      tenantId: tenantObjectId,
-    })
+    const order = await this.orderModel
+      .findOne({
+        _id: orderId,
+        tenantId: tenantObjectId,
+      })
       .populate('items.itemId', 'name category imageUrl sellingPrice status')
       .exec();
     if (!order) throw new NotFoundException('Order not found');
@@ -321,35 +430,53 @@ export class OrdersService {
   }
 
   async getTableSessionSummary(tenantId: string, sessionId: string) {
-    const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Table session not found');
+    const tenantObjectId = this.toPublicTenantObjectId(
+      tenantId,
+      'Table session not found',
+    );
     await this.assertTenantAcceptsPublicOrders(tenantObjectId);
     const sessionObjectId = this.toObjectId(sessionId, 'Invalid table session');
     return this.buildTableSessionSummary(tenantObjectId, sessionObjectId);
   }
 
-  async createCustomerRequest(tenantId: string, qrToken: string, dto: CreateCustomerRequestDto) {
-    const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Invalid or expired QR code');
+  async createCustomerRequest(
+    tenantId: string,
+    qrToken: string,
+    dto: CreateCustomerRequestDto,
+  ) {
+    const tenantObjectId = this.toPublicTenantObjectId(
+      tenantId,
+      'Invalid or expired QR code',
+    );
     await this.assertTenantAcceptsPublicOrders(tenantObjectId);
     const requestType = dto?.type;
     if (!Object.values(CustomerRequestType).includes(requestType)) {
       throw new BadRequestException('Invalid customer request type');
     }
 
-    const table = await this.tableModel.findOne({
-      tenantId: tenantObjectId,
-      qrCodeToken: qrToken,
-    }).exec();
+    const table = await this.tableModel
+      .findOne({
+        tenantId: tenantObjectId,
+        qrCodeToken: qrToken,
+      })
+      .exec();
 
     if (!table) throw new NotFoundException('Invalid or expired QR code');
-    if (table.isHidden) throw new BadRequestException('This table is currently unavailable');
+    if (table.isHidden)
+      throw new BadRequestException('This table is currently unavailable');
 
-    const sessionObjectId = this.toObjectId(dto.sessionId, 'Invalid table session');
-    const tableSession = await this.tableSessionModel.findOne({
-      _id: sessionObjectId,
-      tenantId: tenantObjectId,
-      tableId: table._id,
-      status: TableSessionStatus.OPEN,
-    }).exec();
+    const sessionObjectId = this.toObjectId(
+      dto.sessionId,
+      'Invalid table session',
+    );
+    const tableSession = await this.tableSessionModel
+      .findOne({
+        _id: sessionObjectId,
+        tenantId: tenantObjectId,
+        tableId: table._id,
+        status: TableSessionStatus.OPEN,
+      })
+      .exec();
 
     if (!tableSession) {
       throw new BadRequestException('Invalid or expired table session');
@@ -357,12 +484,19 @@ export class OrdersService {
 
     if (dto.customerName || dto.customerPhone) {
       tableSession.customerName = dto.customerName || tableSession.customerName;
-      tableSession.customerPhone = dto.customerPhone || tableSession.customerPhone;
+      tableSession.customerPhone =
+        dto.customerPhone || tableSession.customerPhone;
       tableSession.lastActivityAt = new Date();
     }
 
-    const summary = await this.buildTableSessionSummary(tenantObjectId, sessionObjectId);
-    const paymentMethod = this.getRequestPaymentMethod(requestType, dto.paymentMethod);
+    const summary = await this.buildTableSessionSummary(
+      tenantObjectId,
+      sessionObjectId,
+    );
+    const paymentMethod = this.getRequestPaymentMethod(
+      requestType,
+      dto.paymentMethod,
+    );
     let payment: any = null;
 
     if (
@@ -380,7 +514,11 @@ export class OrdersService {
     await tableSession.save();
 
     if (requestType === CustomerRequestType.PRINT_BILL) {
-      payment = await this.ensurePayosPaymentForSession(tenantObjectId, tableSession, summary);
+      payment = await this.ensurePayosPaymentForSession(
+        tenantObjectId,
+        tableSession,
+        summary,
+      );
     }
 
     const idempotentRequestTypes = [
@@ -390,18 +528,30 @@ export class OrdersService {
       CustomerRequestType.PRINT_BILL,
     ];
     if (idempotentRequestTypes.includes(requestType)) {
-      const existingRequest = await this.customerRequestModel.findOne({
-        tenantId: tenantObjectId,
-        tableId: table._id,
-        sessionId: tableSession._id,
-        type: requestType,
-        status: { $in: [CustomerRequestStatus.PENDING, CustomerRequestStatus.ACKNOWLEDGED] },
-      }).sort({ createdAt: -1 }).exec();
+      const existingRequest = await this.customerRequestModel
+        .findOne({
+          tenantId: tenantObjectId,
+          tableId: table._id,
+          sessionId: tableSession._id,
+          type: requestType,
+          status: {
+            $in: [
+              CustomerRequestStatus.PENDING,
+              CustomerRequestStatus.ACKNOWLEDGED,
+            ],
+          },
+        })
+        .sort({ createdAt: -1 })
+        .exec();
 
       if (existingRequest) {
         if (!payment && existingRequest.paymentId) {
-          const existingPayment = await this.customerPaymentModel.findById(existingRequest.paymentId).exec();
-          payment = existingPayment ? this.toPublicPaymentResponse(existingPayment) : null;
+          const existingPayment = await this.customerPaymentModel
+            .findById(existingRequest.paymentId)
+            .exec();
+          payment = existingPayment
+            ? this.toPublicPaymentResponse(existingPayment)
+            : null;
         }
 
         return {
@@ -435,7 +585,9 @@ export class OrdersService {
       customerPhone: tableSession.customerPhone,
       tableNameSnapshot: table.name,
       qrTokenSnapshot: qrToken,
-      paymentId: payment?.paymentId ? new Types.ObjectId(payment.paymentId) : undefined,
+      paymentId: payment?.paymentId
+        ? new Types.ObjectId(payment.paymentId)
+        : undefined,
       billSnapshot: summary.bill,
     });
 
@@ -457,19 +609,37 @@ export class OrdersService {
       createdAt: (savedRequest as any).createdAt,
     };
 
+    await this.auditLogService.logSystem(tenantId, 'CUSTOMER_REQUEST_CREATED', {
+      requestId: savedRequest._id.toString(),
+      type: savedRequest.type,
+      sessionId: tableSession._id.toString(),
+      tableId: table._id.toString(),
+      tableName: table.name,
+      paymentMethod,
+      amount: summary.bill?.finalAmount,
+    });
+
     this.chatGateway.sendOrderEvent(tenantId, 'customerRequest', payload);
     return payload;
   }
 
   async createPayosPayment(tenantId: string, dto: CreatePayosPaymentDto) {
-    const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Table session not found');
+    const tenantObjectId = this.toPublicTenantObjectId(
+      tenantId,
+      'Table session not found',
+    );
     await this.assertTenantAcceptsPublicOrders(tenantObjectId);
-    const sessionObjectId = this.toObjectId(dto.sessionId, 'Invalid table session');
-    const tableSession = await this.tableSessionModel.findOne({
-      _id: sessionObjectId,
-      tenantId: tenantObjectId,
-      status: TableSessionStatus.OPEN,
-    }).exec();
+    const sessionObjectId = this.toObjectId(
+      dto.sessionId,
+      'Invalid table session',
+    );
+    const tableSession = await this.tableSessionModel
+      .findOne({
+        _id: sessionObjectId,
+        tenantId: tenantObjectId,
+        status: TableSessionStatus.OPEN,
+      })
+      .exec();
 
     if (!tableSession) {
       throw new BadRequestException('Invalid or expired table session');
@@ -477,33 +647,48 @@ export class OrdersService {
 
     if (dto.customerName || dto.customerPhone) {
       tableSession.customerName = dto.customerName || tableSession.customerName;
-      tableSession.customerPhone = dto.customerPhone || tableSession.customerPhone;
+      tableSession.customerPhone =
+        dto.customerPhone || tableSession.customerPhone;
     }
     tableSession.paymentStatus = TableSessionPaymentStatus.REQUESTED;
     tableSession.paymentMethod = TableSessionPaymentMethod.TRANSFER;
     tableSession.lastActivityAt = new Date();
     await tableSession.save();
 
-    const summary = await this.buildTableSessionSummary(tenantObjectId, sessionObjectId);
-    return this.ensurePayosPaymentForSession(tenantObjectId, tableSession, summary);
+    const summary = await this.buildTableSessionSummary(
+      tenantObjectId,
+      sessionObjectId,
+    );
+    return this.ensurePayosPaymentForSession(
+      tenantObjectId,
+      tableSession,
+      summary,
+    );
   }
 
-  async getCustomerPaymentStatus(paymentId: string, tenantId: string, sessionId: string) {
+  async getCustomerPaymentStatus(
+    paymentId: string,
+    tenantId: string,
+    sessionId: string,
+  ) {
     const paymentObjectId = this.toObjectId(paymentId, 'Payment not found');
     const tenantObjectId = this.toObjectId(tenantId, 'Payment not found');
     const sessionObjectId = this.toObjectId(sessionId, 'Payment not found');
-    const payment = await this.customerPaymentModel.findOne({
-      _id: paymentObjectId,
-      tenantId: tenantObjectId,
-      sessionId: sessionObjectId,
-    }).exec();
+    const payment = await this.customerPaymentModel
+      .findOne({
+        _id: paymentObjectId,
+        tenantId: tenantObjectId,
+        sessionId: sessionObjectId,
+      })
+      .exec();
     if (!payment) throw new NotFoundException('Payment not found');
     return this.toPublicPaymentResponse(payment);
   }
 
   async handlePayosWebhook(body: Record<string, unknown>) {
     const data = this.asRecord(body?.data);
-    const receivedSignature = typeof body?.signature === 'string' ? body.signature : '';
+    const receivedSignature =
+      typeof body?.signature === 'string' ? body.signature : '';
     const checksumKey = process.env.PAYOS_CHECKSUM_KEY;
 
     if (!checksumKey || !receivedSignature) {
@@ -520,7 +705,9 @@ export class OrdersService {
       throw new BadRequestException('Invalid payOS order code');
     }
 
-    const payment = await this.customerPaymentModel.findOne({ orderCode }).exec();
+    const payment = await this.customerPaymentModel
+      .findOne({ orderCode })
+      .exec();
     if (!payment) {
       return { success: true };
     }
@@ -528,50 +715,112 @@ export class OrdersService {
     payment.webhookPayload = body;
     const webhookCode = String(data.code || body.code || '');
     const isPaid = body.success === true || webhookCode === '00';
-    const isCancelled = data.cancel === true || String(data.status || '').toUpperCase() === 'CANCELLED';
+    const isCancelled =
+      data.cancel === true ||
+      String(data.status || '').toUpperCase() === 'CANCELLED';
 
+    const wasAlreadyPaid = payment.status === CustomerPaymentStatus.PAID;
     if (isPaid) {
       payment.status = CustomerPaymentStatus.PAID;
-      payment.paidAt = new Date();
-    } else if (isCancelled) {
+      payment.paidAt = payment.paidAt || new Date();
+    } else if (isCancelled && payment.status !== CustomerPaymentStatus.PAID) {
       payment.status = CustomerPaymentStatus.CANCELLED;
     }
 
     const savedPayment = await payment.save();
-    if (savedPayment.status === CustomerPaymentStatus.PAID) {
-      this.chatGateway.sendOrderEvent(savedPayment.tenantId.toString(), 'paymentPaid', {
-        ...this.toPublicPaymentResponse(savedPayment),
-        tableId: savedPayment.tableId.toString(),
-        tableName: savedPayment.tableNameSnapshot,
-        sessionId: savedPayment.sessionId.toString(),
-        customerName: savedPayment.customerName,
-        customerPhone: savedPayment.customerPhone,
-        bill: savedPayment.billSnapshot,
-      });
+    if (
+      isPaid &&
+      !wasAlreadyPaid &&
+      savedPayment.status === CustomerPaymentStatus.PAID
+    ) {
+      await this.tableSessionModel
+        .updateOne(
+          {
+            _id: savedPayment.sessionId,
+            tenantId: savedPayment.tenantId,
+          },
+          {
+            $set: {
+              paymentStatus: TableSessionPaymentStatus.PAID,
+              paymentMethod: TableSessionPaymentMethod.TRANSFER,
+              paidAt: savedPayment.paidAt || new Date(),
+              lastActivityAt: new Date(),
+            },
+          },
+        )
+        .exec();
+
+      await this.auditLogService.logSystem(
+        savedPayment.tenantId.toString(),
+        'CUSTOMER_PAYMENT_PAID',
+        {
+          paymentId: savedPayment._id.toString(),
+          orderCode: savedPayment.orderCode,
+          amount: savedPayment.amount,
+          sessionId: savedPayment.sessionId.toString(),
+          tableId: savedPayment.tableId.toString(),
+          provider: savedPayment.provider,
+        },
+      );
+
+      this.chatGateway.sendOrderEvent(
+        savedPayment.tenantId.toString(),
+        'paymentPaid',
+        {
+          ...this.toPublicPaymentResponse(savedPayment),
+          tableId: savedPayment.tableId.toString(),
+          tableName: savedPayment.tableNameSnapshot,
+          sessionId: savedPayment.sessionId.toString(),
+          customerName: savedPayment.customerName,
+          customerPhone: savedPayment.customerPhone,
+          bill: savedPayment.billSnapshot,
+        },
+      );
     }
 
     return { success: true };
   }
 
-  async createQrOrder(tenantId: string, qrToken: string, dto: CreateOrderDto): Promise<Order> {
-    const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Invalid or expired QR code');
+  async createQrOrder(
+    tenantId: string,
+    qrToken: string,
+    dto: CreateOrderDto,
+  ): Promise<Order> {
+    const tenantObjectId = this.toPublicTenantObjectId(
+      tenantId,
+      'Invalid or expired QR code',
+    );
     await this.assertTenantAcceptsPublicOrders(tenantObjectId);
-    const table = await this.tableModel.findOne({
-      tenantId: tenantObjectId,
-      qrCodeToken: qrToken,
-    }).exec();
+    const table = await this.tableModel
+      .findOne({
+        tenantId: tenantObjectId,
+        qrCodeToken: qrToken,
+      })
+      .exec();
 
     if (!table) throw new NotFoundException('Invalid or expired QR code');
-    if (table.isHidden) throw new BadRequestException('This table is currently unavailable');
-    const tableSession = await this.resolveOpenTableSession(tenantObjectId, table, qrToken, dto.sessionId);
+    if (table.isHidden)
+      throw new BadRequestException('This table is currently unavailable');
+    const tableSession = await this.resolveOpenTableSession(
+      tenantObjectId,
+      table,
+      qrToken,
+      dto.sessionId,
+    );
 
     const requestedItems = Array.isArray(dto.items) ? [...dto.items] : [];
 
-    if (table.defaultItemsEnabled && table.defaultItems && table.defaultItems.length > 0) {
+    if (
+      table.defaultItemsEnabled &&
+      table.defaultItems &&
+      table.defaultItems.length > 0
+    ) {
       for (const defaultItem of table.defaultItems) {
         const defaultItemId = defaultItem.itemId.toString();
         const alreadyExists = requestedItems.some(
-          (i) => String((i as any).menuItemId || (i as any).itemId) === defaultItemId,
+          (i) =>
+            String((i as any).menuItemId || (i as any).itemId) ===
+            defaultItemId,
         );
         if (!alreadyExists) {
           requestedItems.push({
@@ -603,7 +852,8 @@ export class OrdersService {
 
     const savedOrder = await order.save();
     tableSession.customerName = dto.customerName || tableSession.customerName;
-    tableSession.customerPhone = dto.customerPhone || tableSession.customerPhone;
+    tableSession.customerPhone =
+      dto.customerPhone || tableSession.customerPhone;
     tableSession.lastActivityAt = new Date();
     await tableSession.save();
     await this.markTableServing(table);
@@ -612,11 +862,22 @@ export class OrdersService {
     return savedOrder;
   }
 
-  async createStaffOrder(tenantId: string, creatorId: string, dto: CreateOrderDto): Promise<Order> {
+  async createStaffOrder(
+    tenantId: string,
+    creatorId: string,
+    dto: CreateOrderDto,
+  ): Promise<Order> {
     const tenantObjectId = new Types.ObjectId(tenantId);
-    const table = await this.tableModel.findOne({ _id: dto.tableId, tenantId: tenantObjectId }).exec();
+    const table = await this.tableModel
+      .findOne({ _id: dto.tableId, tenantId: tenantObjectId })
+      .exec();
     if (!table) throw new NotFoundException('Table not found');
-    const tableSession = await this.resolveOpenTableSession(tenantObjectId, table, table.qrCodeToken, dto.sessionId);
+    const tableSession = await this.resolveOpenTableSession(
+      tenantObjectId,
+      table,
+      table.qrCodeToken,
+      dto.sessionId,
+    );
 
     const items = await this.buildOrderItems(tenantId, dto.items);
     items.forEach((item) => {
@@ -647,14 +908,23 @@ export class OrdersService {
     return savedOrder;
   }
 
-  async confirmOrder(tenantId: string, orderId: string, confirmedBy: string): Promise<Order> {
-    const order = await this.orderModel.findOne({ _id: orderId, tenantId: new Types.ObjectId(tenantId) }).exec();
+  async confirmOrder(
+    tenantId: string,
+    orderId: string,
+    confirmedBy: string,
+  ): Promise<Order> {
+    const order = await this.orderModel
+      .findOne({ _id: orderId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!order) throw new NotFoundException('Order not found');
     if (order.status !== OrderStatus.PENDING) {
       throw new BadRequestException('Order is already processed');
     }
 
-    const preparedItems = await this.validateOrderStockAvailability(tenantId, order.items);
+    const preparedItems = await this.validateOrderStockAvailability(
+      tenantId,
+      order.items,
+    );
     order.items = preparedItems as any;
 
     order.status = OrderStatus.IN_PROGRESS;
@@ -671,8 +941,14 @@ export class OrdersService {
     return savedOrder;
   }
 
-  async rejectOrder(tenantId: string, orderId: string, reason?: string): Promise<Order> {
-    const order = await this.orderModel.findOne({ _id: orderId, tenantId: new Types.ObjectId(tenantId) }).exec();
+  async rejectOrder(
+    tenantId: string,
+    orderId: string,
+    reason?: string,
+  ): Promise<Order> {
+    const order = await this.orderModel
+      .findOne({ _id: orderId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!order) throw new NotFoundException('Order not found');
     if (order.status !== OrderStatus.PENDING) {
       throw new BadRequestException('Order is already processed');
@@ -686,17 +962,22 @@ export class OrdersService {
 
     const table = await this.tableModel.findById(order.tableId).exec();
     if (table) {
-      const otherOrders = await this.orderModel.countDocuments({
-        tableId: table._id,
-        tenantId: new Types.ObjectId(tenantId),
-        _id: { $ne: order._id },
-        status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
-      }).exec();
+      const otherOrders = await this.orderModel
+        .countDocuments({
+          tableId: table._id,
+          tenantId: new Types.ObjectId(tenantId),
+          _id: { $ne: order._id },
+          status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+        })
+        .exec();
 
       if (otherOrders === 0) {
         table.status = TableStatus.EMPTY;
         await table.save();
-        await this.closeOpenTableSessions(tenantId, table._id as Types.ObjectId);
+        await this.closeOpenTableSessions(
+          tenantId,
+          table._id as Types.ObjectId,
+        );
       }
     }
 
@@ -712,24 +993,33 @@ export class OrdersService {
     cancelledBy: string,
     userRole: string,
     reason?: string,
+    canCancelLate = false,
   ): Promise<Order> {
-    const order = await this.orderModel.findOne({ _id: orderId, tenantId: new Types.ObjectId(tenantId) }).exec();
+    const order = await this.orderModel
+      .findOne({ _id: orderId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!order) throw new NotFoundException('Order not found');
 
-    const item = order.items.find((i: any) => (i as any)._id?.toString() === itemId || i.itemId.toString() === itemId);
+    const item = order.items.find(
+      (i: any) =>
+        (i as any)._id?.toString() === itemId || i.itemId.toString() === itemId,
+    );
     if (!item) throw new NotFoundException('Item not found in order');
 
     if (item.status === OrderItemStatus.CANCELLED) {
       throw new BadRequestException('Item is already cancelled');
     }
 
-    const confirmedAt = order.confirmedAt || (order as any).createdAt || new Date();
+    const confirmedAt =
+      order.confirmedAt || (order as any).createdAt || new Date();
     const elapsedMs = Date.now() - new Date(confirmedAt).getTime();
     const twoMinutesMs = 2 * 60 * 1000;
 
     if (elapsedMs > twoMinutesMs) {
-      if (userRole !== 'ADMIN' && userRole !== 'MANAGER') {
-        throw new ForbiddenException('Sau 2 phut chi Quan ly hoac Admin moi co the huy mon.');
+      if (userRole !== 'ADMIN' && userRole !== 'MANAGER' && !canCancelLate) {
+        throw new ForbiddenException(
+          'Sau 2 phut chi Quan ly hoac Admin moi co the huy mon.',
+        );
       }
     }
 
@@ -738,11 +1028,29 @@ export class OrdersService {
     item.cancelledBy = cancelledBy;
     item.cancelReason = reason || 'Khong co ly do';
 
-    order.totalAmount = this.calculateTotalAmount(order.items.filter((i: any) => i.status !== OrderItemStatus.CANCELLED));
+    order.totalAmount = this.calculateTotalAmount(
+      order.items.filter((i: any) => i.status !== OrderItemStatus.CANCELLED),
+    );
     order.finalAmount = order.totalAmount;
 
     const savedOrder = await order.save();
-    this.chatGateway.sendOrderEvent(tenantId, 'itemCancelled', { orderId, itemId, reason });
+    await this.auditLogService.log(
+      tenantId,
+      cancelledBy,
+      'ORDER_ITEM_CANCELLED',
+      {
+        orderId,
+        itemId,
+        reason: item.cancelReason,
+        elapsedMs,
+        itemStatus: item.status,
+      },
+    );
+    this.chatGateway.sendOrderEvent(tenantId, 'itemCancelled', {
+      orderId,
+      itemId,
+      reason,
+    });
     return savedOrder;
   }
 
@@ -757,45 +1065,83 @@ export class OrdersService {
       throw new BadRequestException('Invalid item status');
     }
 
-    const order = await this.orderModel.findOne({ _id: orderId, tenantId: new Types.ObjectId(tenantId) }).exec();
+    const order = await this.orderModel
+      .findOne({ _id: orderId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!order) throw new NotFoundException('Order not found');
 
-    const item = order.items.find((i: any) => (i as any)._id?.toString() === itemId || i.itemId.toString() === itemId);
+    const item = order.items.find(
+      (i: any) =>
+        (i as any)._id?.toString() === itemId || i.itemId.toString() === itemId,
+    );
     if (!item) throw new NotFoundException('Item not found in order');
 
     if (userRole === 'KITCHEN') {
-      if (order.status !== OrderStatus.IN_PROGRESS || item.status !== OrderItemStatus.PREPARING || status !== OrderItemStatus.READY) {
-        throw new ForbiddenException('Bep chi duoc chuyen mon dang lam sang da xong.');
+      if (
+        order.status !== OrderStatus.IN_PROGRESS ||
+        item.status !== OrderItemStatus.PREPARING ||
+        status !== OrderItemStatus.READY
+      ) {
+        throw new ForbiddenException(
+          'Bep chi duoc chuyen mon dang lam sang da xong.',
+        );
       }
     }
 
     if (userRole === 'USER') {
-      if (order.status !== OrderStatus.IN_PROGRESS || item.status !== OrderItemStatus.READY || status !== OrderItemStatus.SERVED) {
-        throw new ForbiddenException('Nhan vien chi duoc chuyen mon da xong sang da phuc vu.');
+      if (
+        order.status !== OrderStatus.IN_PROGRESS ||
+        item.status !== OrderItemStatus.READY ||
+        status !== OrderItemStatus.SERVED
+      ) {
+        throw new ForbiddenException(
+          'Nhan vien chi duoc chuyen mon da xong sang da phuc vu.',
+        );
       }
     }
 
     item.status = status;
 
-    const nonCancelledItems = order.items.filter((i: any) => i.status !== OrderItemStatus.CANCELLED);
-    const allReady = nonCancelledItems.length > 0 && nonCancelledItems.every((i: any) =>
-      i.status === OrderItemStatus.READY || i.status === OrderItemStatus.SERVED,
+    const nonCancelledItems = order.items.filter(
+      (i: any) => i.status !== OrderItemStatus.CANCELLED,
     );
+    const allReady =
+      nonCancelledItems.length > 0 &&
+      nonCancelledItems.every(
+        (i: any) =>
+          i.status === OrderItemStatus.READY ||
+          i.status === OrderItemStatus.SERVED,
+      );
     if (allReady) {
       this.chatGateway.sendOrderEvent(tenantId, 'allItemsReady', { orderId });
     }
 
     const savedOrder = await order.save();
-    this.chatGateway.sendOrderEvent(tenantId, 'itemStatusChanged', { orderId, itemId, status });
+    this.chatGateway.sendOrderEvent(tenantId, 'itemStatusChanged', {
+      orderId,
+      itemId,
+      status,
+    });
     return savedOrder;
   }
 
-  async markFree(tenantId: string, orderId: string, itemId?: string): Promise<Order> {
-    const order = await this.orderModel.findOne({ _id: orderId, tenantId: new Types.ObjectId(tenantId) }).exec();
+  async markFree(
+    tenantId: string,
+    orderId: string,
+    itemId?: string,
+    markedBy?: string,
+  ): Promise<Order> {
+    const order = await this.orderModel
+      .findOne({ _id: orderId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!order) throw new NotFoundException('Order not found');
 
     if (itemId) {
-      const item = order.items.find((i: any) => (i as any)._id?.toString() === itemId || i.itemId.toString() === itemId);
+      const item = order.items.find(
+        (i: any) =>
+          (i as any)._id?.toString() === itemId ||
+          i.itemId.toString() === itemId,
+      );
       if (!item) throw new NotFoundException('Item not found');
       item.isFree = true;
     } else {
@@ -803,15 +1149,32 @@ export class OrdersService {
     }
 
     order.totalAmount = this.calculateTotalAmount(
-      order.items.filter((i: any) => i.status !== OrderItemStatus.CANCELLED && !i.isFree),
+      order.items.filter(
+        (i: any) => i.status !== OrderItemStatus.CANCELLED && !i.isFree,
+      ),
     );
     order.finalAmount = order.isFree ? 0 : order.totalAmount;
 
-    return order.save();
+    const savedOrder = await order.save();
+    await this.auditLogService.log(tenantId, markedBy, 'ORDER_MARKED_FREE', {
+      orderId,
+      itemId,
+      orderIsFree: Boolean(order.isFree),
+      totalAmount: order.totalAmount,
+      finalAmount: order.finalAmount,
+    });
+    return savedOrder;
   }
 
-  async getBill(tenantId: string, orderId: string, discount = 0, discountType: string = 'FLAT'): Promise<any> {
-    const order = await this.orderModel.findOne({ _id: orderId, tenantId: new Types.ObjectId(tenantId) }).exec();
+  async getBill(
+    tenantId: string,
+    orderId: string,
+    discount = 0,
+    discountType: string = 'FLAT',
+  ): Promise<any> {
+    const order = await this.orderModel
+      .findOne({ _id: orderId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!order) throw new NotFoundException('Order not found');
 
     if (order.isFree) {
@@ -843,7 +1206,9 @@ export class OrdersService {
     const amountAfterDiscount = Math.max(0, subtotal - discountAmount);
 
     const vatAmount = Math.round(amountAfterDiscount * (vatRate / 100));
-    const serviceChargeAmount = Math.round(amountAfterDiscount * (serviceChargeRate / 100));
+    const serviceChargeAmount = Math.round(
+      amountAfterDiscount * (serviceChargeRate / 100),
+    );
     const finalAmount = amountAfterDiscount + vatAmount + serviceChargeAmount;
 
     return {
@@ -858,85 +1223,33 @@ export class OrdersService {
     };
   }
 
-  async checkout(tenantId: string, orderId: string, discount = 0, discountType: string = 'FLAT'): Promise<Order> {
-    const session = await this.connection.startSession();
+  async checkout(
+    tenantId: string,
+    orderId: string,
+    discount = 0,
+    discountType: string = 'FLAT',
+    actorId?: string,
+    options: {
+      skipCashMovement?: boolean;
+      paymentMethod?: PaymentMethod;
+    } = {},
+  ): Promise<Order> {
     let savedOrder: OrderDocument | null = null;
-
-    try {
-      // Checkout uses Mongo transaction for all-or-nothing ingredient deduction.
-      // Local standalone MongoDB does not support transactions. Use replica set/Atlas for this flow.
-      await session.withTransaction(async () => {
-        const order = await this.orderModel.findOne({
-          _id: orderId,
-          tenantId: new Types.ObjectId(tenantId),
-        }).session(session).exec();
-
-        if (!order) throw new NotFoundException('Order not found');
-        if (order.status === OrderStatus.COMPLETED) {
-          throw new BadRequestException('Order already checked out');
-        }
-        if (order.status === OrderStatus.CANCELLED) {
-          throw new BadRequestException('Cancelled order cannot be checked out');
-        }
-
-        const preparedItems = await this.validateOrderStockAvailability(tenantId, order.items, session);
-        order.items = preparedItems as any;
-
-        const ingredientRequirements = this.buildIngredientRequirements(preparedItems);
-        if (ingredientRequirements.length === 0) {
-          throw new BadRequestException('Order has no active items to process');
-        }
-
-        const bill = await this.calculateBillFromOrder(tenantId, order, discount, discountType, session);
-
-        for (const requirement of ingredientRequirements) {
-          await this.inventoryService.deductStock(
-            tenantId,
-            requirement.inventoryItemId,
-            requirement.totalRequestedQuantity,
-            { session, itemName: requirement.ingredientName },
-          );
-        }
-
-        order.status = OrderStatus.COMPLETED;
-        order.completedAt = new Date();
-        order.discount = bill.discount;
-        order.discountType = discountType;
-        order.vat = bill.vatAmount;
-        order.serviceCharge = bill.serviceChargeAmount;
-        order.finalAmount = bill.finalAmount;
-        savedOrder = await order.save({ session });
-
-        const table = await this.tableModel.findById(order.tableId).session(session).exec();
-        if (table) {
-          const otherOrders = await this.orderModel.countDocuments({
-            tableId: table._id,
-            tenantId: new Types.ObjectId(tenantId),
-            _id: { $ne: order._id },
-            status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
-          }).session(session).exec();
-
-          if (otherOrders === 0) {
-            table.status = TableStatus.CLEANING;
-            await table.save({ session });
-            await this.closeOpenTableSessions(new Types.ObjectId(tenantId), table._id as Types.ObjectId, session);
-          }
-        }
-      });
-    } catch (error: any) {
-      if (this.isMongoTransactionUnsupportedError(error)) {
-        this.logger.warn(
-          `Checkout transaction unsupported on current Mongo deployment (tenantId=${tenantId}, orderId=${orderId}).`,
-        );
-        throw new BadRequestException({
-          code: 'MONGO_TRANSACTION_UNSUPPORTED',
-          message: 'MongoDB transaction is not supported. Configure replica set or use MongoDB Atlas/replica set.',
-        });
-      }
-      throw error;
-    } finally {
-      await session.endSession();
-    }
+    savedOrder = await runTransactionSensitive(
+      this.connection,
+      (session) =>
+        this.checkoutOrderWithinSession(
+          tenantId,
+          orderId,
+          discount,
+          discountType,
+          actorId,
+          options,
+          session,
+        ),
+      `checkout order ${orderId}`,
+      this.logger,
+    );
 
     if (!savedOrder) {
       throw new BadRequestException('Checkout failed');
@@ -946,12 +1259,133 @@ export class OrdersService {
     return savedOrder;
   }
 
+  private async checkoutOrderWithinSession(
+    tenantId: string,
+    orderId: string,
+    discount: number,
+    discountType: string,
+    actorId: string | undefined,
+    options: {
+      skipCashMovement?: boolean;
+      paymentMethod?: PaymentMethod;
+    },
+    session: ClientSession,
+  ): Promise<OrderDocument> {
+    const order = await this.orderModel
+      .findOne({
+        _id: orderId,
+        tenantId: new Types.ObjectId(tenantId),
+      })
+      .session(session)
+      .exec();
+
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.status === OrderStatus.COMPLETED) {
+      throw new BadRequestException('Order already checked out');
+    }
+    if (order.status === OrderStatus.CANCELLED) {
+      throw new BadRequestException('Cancelled order cannot be checked out');
+    }
+
+    const preparedItems = await this.validateOrderStockAvailability(
+      tenantId,
+      order.items,
+      session,
+    );
+    const costedItems = await this.attachCostSnapshotsToItems(
+      tenantId,
+      preparedItems,
+      session,
+    );
+    order.items = costedItems as any;
+
+    const ingredientRequirements =
+      this.buildIngredientRequirements(costedItems);
+    if (ingredientRequirements.length === 0) {
+      throw new BadRequestException('Order has no active items to process');
+    }
+
+    const bill = await this.calculateBillFromOrder(
+      tenantId,
+      order,
+      discount,
+      discountType,
+      session,
+    );
+
+    for (const requirement of ingredientRequirements) {
+      await this.inventoryService.deductStock(
+        tenantId,
+        requirement.inventoryItemId,
+        requirement.totalRequestedQuantity,
+        { session, itemName: requirement.ingredientName },
+      );
+    }
+
+    order.status = OrderStatus.COMPLETED;
+    order.completedAt = new Date();
+    order.discount = bill.discount;
+    order.discountType = discountType;
+    order.vat = bill.vatAmount;
+    order.serviceCharge = bill.serviceChargeAmount;
+    order.finalAmount = bill.finalAmount;
+    const savedOrder = await order.save({ session });
+
+    if (!options.skipCashMovement && actorId && this.cashierService) {
+      const cashierShift = await this.cashierService.requireOpenShift(
+        tenantId,
+        session,
+      );
+      await this.cashierService.recordMovement({
+        tenantId,
+        shiftId: (cashierShift._id as Types.ObjectId).toString(),
+        type: CashMovementType.MANUAL_CHECKOUT,
+        amount: bill.finalAmount,
+        paymentMethod: options.paymentMethod || PaymentMethod.CASH,
+        sourceType: CashMovementSourceType.ORDER,
+        sourceId: order._id.toString(),
+        reason: 'Order checkout',
+        createdBy: actorId,
+        session,
+      });
+    }
+
+    const table = await this.tableModel
+      .findById(order.tableId)
+      .session(session)
+      .exec();
+    if (table) {
+      const otherOrders = await this.orderModel
+        .countDocuments({
+          tableId: table._id,
+          tenantId: new Types.ObjectId(tenantId),
+          _id: { $ne: order._id },
+          status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+        })
+        .session(session)
+        .exec();
+
+      if (otherOrders === 0) {
+        table.status = TableStatus.CLEANING;
+        await table.save({ session });
+        await this.closeOpenTableSessions(
+          new Types.ObjectId(tenantId),
+          table._id as Types.ObjectId,
+          session,
+        );
+      }
+    }
+
+    return savedOrder;
+  }
+
   async getStaffWorkspace(tenantId: string) {
     const tenantObjectId = new Types.ObjectId(tenantId);
-    const sessions = await this.tableSessionModel.find({
-      tenantId: tenantObjectId,
-      status: TableSessionStatus.OPEN,
-    })
+    const sessions = await this.tableSessionModel
+      .find({
+        tenantId: tenantObjectId,
+        status: TableSessionStatus.OPEN,
+      })
       .sort({ lastActivityAt: -1, openedAt: -1 })
       .exec();
 
@@ -960,30 +1394,43 @@ export class OrdersService {
     }
 
     const sessionIds = sessions.map((session) => session._id as Types.ObjectId);
-    const tableIds = Array.from(new Set(sessions.map((session) => session.tableId.toString())))
+    const tableIds = Array.from(
+      new Set(sessions.map((session) => session.tableId.toString())),
+    )
       .filter((id) => Types.ObjectId.isValid(id))
       .map((id) => new Types.ObjectId(id));
 
     const [tables, orders, requests] = await Promise.all([
-      this.tableModel.find({ _id: { $in: tableIds }, tenantId: tenantObjectId }).exec(),
-      this.orderModel.find({
-        tenantId: tenantObjectId,
-        sessionId: { $in: sessionIds },
-        status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
-      })
+      this.tableModel
+        .find({ _id: { $in: tableIds }, tenantId: tenantObjectId })
+        .exec(),
+      this.orderModel
+        .find({
+          tenantId: tenantObjectId,
+          sessionId: { $in: sessionIds },
+          status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+        })
         .populate('items.itemId', 'name category imageUrl sellingPrice status')
         .sort({ createdAt: -1 })
         .exec(),
-      this.customerRequestModel.find({
-        tenantId: tenantObjectId,
-        sessionId: { $in: sessionIds },
-        status: { $in: [CustomerRequestStatus.PENDING, CustomerRequestStatus.ACKNOWLEDGED] },
-      })
+      this.customerRequestModel
+        .find({
+          tenantId: tenantObjectId,
+          sessionId: { $in: sessionIds },
+          status: {
+            $in: [
+              CustomerRequestStatus.PENDING,
+              CustomerRequestStatus.ACKNOWLEDGED,
+            ],
+          },
+        })
         .sort({ createdAt: -1 })
         .exec(),
     ]);
 
-    const tableById = new Map(tables.map((table) => [table._id.toString(), table]));
+    const tableById = new Map(
+      tables.map((table) => [table._id.toString(), table]),
+    );
     const ordersBySession = new Map<string, any[]>();
     const requestsBySession = new Map<string, any[]>();
 
@@ -1010,32 +1457,46 @@ export class OrdersService {
           const table = tableById.get(tableSession.tableId.toString());
           const sessionOrders = ordersBySession.get(sessionId) || [];
           const sessionRequests = requestsBySession.get(sessionId) || [];
-          const publicOrders = sessionOrders.map((order) => this.toPublicSessionOrder(order));
+          const publicOrders = sessionOrders.map((order) =>
+            this.toPublicSessionOrder(order),
+          );
           const billItems = publicOrders.flatMap((order: any) =>
             order.items
-              .filter((item: any) => item.status !== OrderItemStatus.CANCELLED && !item.isFree)
+              .filter(
+                (item: any) =>
+                  item.status !== OrderItemStatus.CANCELLED && !item.isFree,
+              )
               .map((item: any) => ({
                 ...item,
                 orderId: order._id,
                 orderCode: order._id.slice(-6).toUpperCase(),
               })),
           );
-          const subtotal = billItems.reduce((sum, item) => sum + item.subtotal, 0);
-          const totalQuantity = billItems.reduce((sum, item) => sum + item.quantity, 0);
+          const subtotal = billItems.reduce(
+            (sum, item) => sum + item.subtotal,
+            0,
+          );
+          const totalQuantity = billItems.reduce(
+            (sum, item) => sum + item.quantity,
+            0,
+          );
 
           return {
             sessionId,
             table: {
               _id: tableSession.tableId.toString(),
-              name: table?.name || tableSession.qrCodeTokenSnapshot || 'Mang di',
+              name:
+                table?.name || tableSession.qrCodeTokenSnapshot || 'Mang di',
               status: table?.status,
             },
             customer: {
               name: tableSession.customerName || '',
               phone: tableSession.customerPhone || '',
             },
-            paymentStatus: tableSession.paymentStatus || TableSessionPaymentStatus.UNPAID,
+            paymentStatus:
+              tableSession.paymentStatus || TableSessionPaymentStatus.UNPAID,
             paymentMethod: tableSession.paymentMethod,
+            paidAt: tableSession.paidAt,
             openedAt: tableSession.openedAt,
             lastActivityAt: tableSession.lastActivityAt,
             orders: publicOrders,
@@ -1061,15 +1522,18 @@ export class OrdersService {
             },
           };
         })
-        .filter((session) => session.orders.length > 0 || session.requests.length > 0),
+        .filter(
+          (session) => session.orders.length > 0 || session.requests.length > 0,
+        ),
     };
   }
 
   async getKitchenQueue(tenantId: string) {
-    const orders = await this.orderModel.find({
-      tenantId: new Types.ObjectId(tenantId),
-      status: OrderStatus.IN_PROGRESS,
-    })
+    const orders = await this.orderModel
+      .find({
+        tenantId: new Types.ObjectId(tenantId),
+        status: OrderStatus.IN_PROGRESS,
+      })
       .populate('tableId', 'name status')
       .populate('items.itemId', 'name category imageUrl status')
       .sort({ confirmedAt: 1, createdAt: 1 })
@@ -1077,11 +1541,22 @@ export class OrdersService {
 
     const queue: any[] = [];
     orders.forEach((order: any) => {
-      const tableName = typeof order.tableId === 'object' && order.tableId?.name ? order.tableId.name : 'Mang di';
-      const tableId = typeof order.tableId === 'object' && order.tableId?._id ? order.tableId._id.toString() : order.tableId?.toString?.();
+      const tableName =
+        typeof order.tableId === 'object' && order.tableId?.name
+          ? order.tableId.name
+          : 'Mang di';
+      const tableId =
+        typeof order.tableId === 'object' && order.tableId?._id
+          ? order.tableId._id.toString()
+          : order.tableId?.toString?.();
 
       (order.items || []).forEach((item: any) => {
-        if (![OrderItemStatus.PREPARING, OrderItemStatus.READY].includes(item.status)) return;
+        if (
+          ![OrderItemStatus.PREPARING, OrderItemStatus.READY].includes(
+            item.status,
+          )
+        )
+          return;
         const itemRef = item.itemId;
         queue.push({
           orderId: order._id.toString(),
@@ -1091,7 +1566,10 @@ export class OrdersService {
           tableName,
           sessionId: order.sessionId?.toString?.(),
           itemId: this.getOrderItemMenuId(item),
-          name: itemRef && typeof itemRef === 'object' && itemRef.name ? itemRef.name : this.getOrderItemName(item),
+          name:
+            itemRef && typeof itemRef === 'object' && itemRef.name
+              ? itemRef.name
+              : this.getOrderItemName(item),
           quantity: Number(item.quantity || 0),
           note: item.note,
           status: item.status,
@@ -1104,22 +1582,30 @@ export class OrdersService {
     return { items: queue };
   }
 
-  async updateCustomerRequestStatus(tenantId: string, requestId: string, status: string) {
+  async updateCustomerRequestStatus(
+    tenantId: string,
+    requestId: string,
+    status: string,
+  ) {
     if (!Types.ObjectId.isValid(requestId)) {
       throw new BadRequestException('Invalid customer request');
     }
-    if (![
-      CustomerRequestStatus.ACKNOWLEDGED,
-      CustomerRequestStatus.DONE,
-      CustomerRequestStatus.CANCELLED,
-    ].includes(status as CustomerRequestStatus)) {
+    if (
+      ![
+        CustomerRequestStatus.ACKNOWLEDGED,
+        CustomerRequestStatus.DONE,
+        CustomerRequestStatus.CANCELLED,
+      ].includes(status as CustomerRequestStatus)
+    ) {
       throw new BadRequestException('Invalid customer request status');
     }
 
-    const request = await this.customerRequestModel.findOne({
-      _id: new Types.ObjectId(requestId),
-      tenantId: new Types.ObjectId(tenantId),
-    }).exec();
+    const request = await this.customerRequestModel
+      .findOne({
+        _id: new Types.ObjectId(requestId),
+        tenantId: new Types.ObjectId(tenantId),
+      })
+      .exec();
 
     if (!request) {
       throw new NotFoundException('Customer request not found');
@@ -1137,7 +1623,11 @@ export class OrdersService {
       updatedAt: (savedRequest as any).updatedAt,
     };
 
-    this.chatGateway.sendOrderEvent(tenantId, 'customerRequestUpdated', payload);
+    this.chatGateway.sendOrderEvent(
+      tenantId,
+      'customerRequestUpdated',
+      payload,
+    );
     return payload;
   }
 
@@ -1150,94 +1640,205 @@ export class OrdersService {
   ) {
     const tenantObjectId = new Types.ObjectId(tenantId);
     const sessionObjectId = this.toObjectId(sessionId, 'Invalid table session');
-    const tableSession = await this.tableSessionModel.findOne({
-      _id: sessionObjectId,
-      tenantId: tenantObjectId,
-      status: TableSessionStatus.OPEN,
-    }).exec();
+    const completedOrders: OrderDocument[] = [];
+    const payload = await runTransactionSensitive(
+      this.connection,
+      async (session) => {
+        const tableSession = await this.tableSessionModel
+          .findOne({
+            _id: sessionObjectId,
+            tenantId: tenantObjectId,
+            status: TableSessionStatus.OPEN,
+          })
+          .session(session)
+          .exec();
 
-    if (!tableSession) {
-      throw new NotFoundException('Open table session not found');
-    }
+        if (!tableSession) {
+          throw new NotFoundException('Open table session not found');
+        }
 
-    const orders = await this.orderModel.find({
-      tenantId: tenantObjectId,
-      sessionId: sessionObjectId,
-      status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
-    })
-      .sort({ createdAt: 1 })
-      .exec();
+        const cashierShift = this.cashierService
+          ? await this.cashierService.requireOpenShift(tenantId, session)
+          : undefined;
 
-    if (orders.length === 0) {
-      throw new BadRequestException('Table session has no active orders');
-    }
+        const orders = await this.orderModel
+          .find({
+            tenantId: tenantObjectId,
+            sessionId: sessionObjectId,
+            status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+          })
+          .sort({ createdAt: 1 })
+          .session(session)
+          .exec();
 
-    const pendingOrder = orders.find((order) => order.status === OrderStatus.PENDING);
-    if (pendingOrder) {
-      throw new BadRequestException('Confirm pending orders before checkout');
-    }
+        if (orders.length === 0) {
+          throw new BadRequestException('Table session has no active orders');
+        }
 
-    const completedOrders: Order[] = [];
-    let totalAmount = 0;
-    for (const order of orders) {
-      const completed = await this.checkout(tenantId, order._id.toString(), discount, discountType);
-      completedOrders.push(completed);
-      totalAmount += Number((completed as any).finalAmount || 0);
-    }
+        const pendingOrder = orders.find(
+          (order) => order.status === OrderStatus.PENDING,
+        );
+        if (pendingOrder) {
+          throw new BadRequestException(
+            'Confirm pending orders before checkout',
+          );
+        }
 
-    await this.tableSessionModel.updateOne(
-      { _id: sessionObjectId, tenantId: tenantObjectId },
-      {
-        $set: {
+        let totalAmount = 0;
+        for (const order of orders) {
+          const completed = await this.checkoutOrderWithinSession(
+            tenantId,
+            order._id.toString(),
+            discount,
+            discountType,
+            paidBy,
+            { skipCashMovement: true },
+            session,
+          );
+          completedOrders.push(completed);
+          totalAmount += Number((completed as any).finalAmount || 0);
+        }
+
+        const paymentAlreadyReceived =
+          tableSession.paymentStatus === TableSessionPaymentStatus.PAID &&
+          tableSession.paymentMethod === TableSessionPaymentMethod.TRANSFER;
+        const paymentMethod = paymentAlreadyReceived
+          ? TableSessionPaymentMethod.TRANSFER
+          : TableSessionPaymentMethod.MANUAL;
+        const paidAt =
+          paymentAlreadyReceived && tableSession.paidAt
+            ? tableSession.paidAt
+            : new Date();
+
+        await this.tableSessionModel
+          .updateOne(
+            { _id: sessionObjectId, tenantId: tenantObjectId },
+            {
+              $set: {
+                paymentStatus: TableSessionPaymentStatus.PAID,
+                paymentMethod,
+                paidAt,
+                paidBy: new Types.ObjectId(paidBy),
+                lastActivityAt: new Date(),
+              },
+            },
+          )
+          .session(session)
+          .exec();
+
+        await this.customerRequestModel
+          .updateMany(
+            {
+              tenantId: tenantObjectId,
+              sessionId: sessionObjectId,
+              type: {
+                $in: [
+                  CustomerRequestType.PAY_CASH,
+                  CustomerRequestType.PAY_TRANSFER,
+                  CustomerRequestType.PRINT_BILL,
+                ],
+              },
+              status: {
+                $in: [
+                  CustomerRequestStatus.PENDING,
+                  CustomerRequestStatus.ACKNOWLEDGED,
+                ],
+              },
+            },
+            { $set: { status: CustomerRequestStatus.DONE } },
+          )
+          .session(session)
+          .exec();
+
+        if (this.cashierService && cashierShift) {
+          await this.cashierService.recordMovement({
+            tenantId,
+            shiftId: (cashierShift._id as Types.ObjectId).toString(),
+            type: CashMovementType.MANUAL_CHECKOUT,
+            amount: totalAmount,
+            paymentMethod: paymentAlreadyReceived
+              ? PaymentMethod.PAYOS
+              : PaymentMethod.CASH,
+            sourceType: CashMovementSourceType.TABLE_SESSION,
+            sourceId: sessionId,
+            reason: 'Table session manual checkout',
+            createdBy: paidBy,
+            session,
+          });
+        }
+
+        return {
+          sessionId,
           paymentStatus: TableSessionPaymentStatus.PAID,
-          paymentMethod: TableSessionPaymentMethod.MANUAL,
-          paidAt: new Date(),
-          paidBy: new Types.ObjectId(paidBy),
-          lastActivityAt: new Date(),
-        },
+          paymentMethod,
+          orderIds: completedOrders.map((order: any) => order._id.toString()),
+          totalAmount,
+          paidAt,
+          paymentAlreadyReceived,
+        };
       },
-    ).exec();
+      `manual checkout table session ${sessionId}`,
+      this.logger,
+    );
 
-    await this.customerRequestModel.updateMany(
+    await this.auditLogService.log(
+      tenantId,
+      paidBy,
+      'TABLE_SESSION_MANUAL_CHECKOUT',
       {
-        tenantId: tenantObjectId,
-        sessionId: sessionObjectId,
-        type: { $in: [CustomerRequestType.PAY_CASH, CustomerRequestType.PAY_TRANSFER, CustomerRequestType.PRINT_BILL] },
-        status: { $in: [CustomerRequestStatus.PENDING, CustomerRequestStatus.ACKNOWLEDGED] },
+        sessionId,
+        orderIds: payload.orderIds,
+        totalAmount: payload.totalAmount,
+        paymentMethod: payload.paymentMethod,
+        paidAt: payload.paidAt,
+        discount,
+        discountType,
+        paymentAlreadyReceived: payload.paymentAlreadyReceived,
       },
-      { $set: { status: CustomerRequestStatus.DONE } },
-    ).exec();
-
-    const payload = {
-      sessionId,
-      paymentStatus: TableSessionPaymentStatus.PAID,
-      paymentMethod: TableSessionPaymentMethod.MANUAL,
-      orderIds: completedOrders.map((order: any) => order._id.toString()),
-      totalAmount,
-      paidAt: new Date(),
+    );
+    completedOrders.forEach((order) => {
+      this.chatGateway.sendOrderEvent(tenantId, 'orderCompleted', order);
+    });
+    this.chatGateway.sendOrderEvent(tenantId, 'manualCheckoutCompleted', {
+      sessionId: payload.sessionId,
+      paymentStatus: payload.paymentStatus,
+      paymentMethod: payload.paymentMethod,
+      orderIds: payload.orderIds,
+      totalAmount: payload.totalAmount,
+      paidAt: payload.paidAt,
+    });
+    return {
+      sessionId: payload.sessionId,
+      paymentStatus: payload.paymentStatus,
+      paymentMethod: payload.paymentMethod,
+      orderIds: payload.orderIds,
+      totalAmount: payload.totalAmount,
+      paidAt: payload.paidAt,
     };
-    this.chatGateway.sendOrderEvent(tenantId, 'manualCheckoutCompleted', payload);
-    return payload;
   }
 
   async findAllActive(tenantId: string): Promise<Order[]> {
-    return this.orderModel.find({
-      tenantId: new Types.ObjectId(tenantId),
-      status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
-    })
+    return this.orderModel
+      .find({
+        tenantId: new Types.ObjectId(tenantId),
+        status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+      })
       .populate('tableId')
       .populate('items.itemId', 'name category imageUrl sellingPrice status')
       .exec();
   }
 
-  async findOrders(tenantId: string, filters: {
-    startDate?: string;
-    endDate?: string;
-    tableId?: string;
-    status?: string;
-    customerPhone?: string;
-    createdBy?: string;
-  }): Promise<Order[]> {
+  async findOrders(
+    tenantId: string,
+    filters: {
+      startDate?: string;
+      endDate?: string;
+      tableId?: string;
+      status?: string;
+      customerPhone?: string;
+      createdBy?: string;
+    },
+  ): Promise<Order[]> {
     const query: any = { tenantId: new Types.ObjectId(tenantId) };
 
     if (filters.startDate || filters.endDate) {
@@ -1255,14 +1856,18 @@ export class OrdersService {
     }
 
     if (filters.customerPhone) {
-      query['customer.phone'] = { $regex: filters.customerPhone, $options: 'i' };
+      query['customer.phone'] = {
+        $regex: filters.customerPhone,
+        $options: 'i',
+      };
     }
 
     if (filters.createdBy) {
       query.createdBy = new Types.ObjectId(filters.createdBy);
     }
 
-    return this.orderModel.find(query)
+    return this.orderModel
+      .find(query)
       .populate('tableId')
       .populate('createdBy', 'name email')
       .sort({ createdAt: -1 })
@@ -1270,10 +1875,11 @@ export class OrdersService {
   }
 
   async findOrderById(tenantId: string, orderId: string): Promise<Order> {
-    const order = await this.orderModel.findOne({
-      _id: orderId,
-      tenantId: new Types.ObjectId(tenantId),
-    })
+    const order = await this.orderModel
+      .findOne({
+        _id: orderId,
+        tenantId: new Types.ObjectId(tenantId),
+      })
       .populate('tableId')
       .populate('createdBy', 'name email')
       .populate('confirmedBy', 'name email')
@@ -1285,25 +1891,30 @@ export class OrdersService {
   }
 
   async getOrdersByTable(tenantId: string, tableId: string): Promise<Order[]> {
-    return this.orderModel.find({
-      tenantId: new Types.ObjectId(tenantId),
-      tableId: new Types.ObjectId(tableId),
-      status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
-    })
+    return this.orderModel
+      .find({
+        tenantId: new Types.ObjectId(tenantId),
+        tableId: new Types.ObjectId(tableId),
+        status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+      })
       .populate('items.itemId', 'name category imageUrl sellingPrice status')
       .sort({ createdAt: -1 })
       .exec();
   }
 
   async getTableBill(tenantId: string, tableId: string): Promise<any> {
-    const tenantObjectId = this.toPublicTenantObjectId(tenantId, 'Table bill not found');
+    const tenantObjectId = this.toPublicTenantObjectId(
+      tenantId,
+      'Table bill not found',
+    );
     await this.assertTenantAcceptsPublicOrders(tenantObjectId);
 
-    const orders = await this.orderModel.find({
-      tenantId: tenantObjectId,
-      tableId: new Types.ObjectId(tableId),
-      status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
-    })
+    const orders = await this.orderModel
+      .find({
+        tenantId: tenantObjectId,
+        tableId: new Types.ObjectId(tableId),
+        status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+      })
       .populate('items.itemId', 'name category imageUrl sellingPrice status')
       .exec();
 
@@ -1332,7 +1943,10 @@ export class OrdersService {
     };
   }
 
-  private toObjectId(value: string | Types.ObjectId | undefined, message: string): Types.ObjectId {
+  private toObjectId(
+    value: string | Types.ObjectId | undefined,
+    message: string,
+  ): Types.ObjectId {
     if (value instanceof Types.ObjectId) return value;
     if (!value || !Types.ObjectId.isValid(value)) {
       throw new BadRequestException(message);
@@ -1340,38 +1954,51 @@ export class OrdersService {
     return new Types.ObjectId(value);
   }
 
-  private async buildTableSessionSummary(tenantObjectId: Types.ObjectId, sessionObjectId: Types.ObjectId) {
-    const tableSession = await this.tableSessionModel.findOne({
-      _id: sessionObjectId,
-      tenantId: tenantObjectId,
-    }).exec();
+  private async buildTableSessionSummary(
+    tenantObjectId: Types.ObjectId,
+    sessionObjectId: Types.ObjectId,
+  ) {
+    const tableSession = await this.tableSessionModel
+      .findOne({
+        _id: sessionObjectId,
+        tenantId: tenantObjectId,
+      })
+      .exec();
 
     if (!tableSession) {
       throw new NotFoundException('Table session not found');
     }
 
-    const table = await this.tableModel.findOne({
-      _id: tableSession.tableId,
-      tenantId: tenantObjectId,
-    }).exec();
+    const table = await this.tableModel
+      .findOne({
+        _id: tableSession.tableId,
+        tenantId: tenantObjectId,
+      })
+      .exec();
 
     if (!table) {
       throw new NotFoundException('Table not found');
     }
 
-    const orders = await this.orderModel.find({
-      tenantId: tenantObjectId,
-      sessionId: sessionObjectId,
-      status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
-    })
+    const orders = await this.orderModel
+      .find({
+        tenantId: tenantObjectId,
+        sessionId: sessionObjectId,
+        status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+      })
       .populate('items.itemId', 'name category imageUrl sellingPrice status')
       .sort({ createdAt: -1 })
       .exec();
 
-    const publicOrders = orders.map((order) => this.toPublicSessionOrder(order));
+    const publicOrders = orders.map((order) =>
+      this.toPublicSessionOrder(order),
+    );
     const billItems = publicOrders.flatMap((order: any) =>
       order.items
-        .filter((item: any) => item.status !== OrderItemStatus.CANCELLED && !item.isFree)
+        .filter(
+          (item: any) =>
+            item.status !== OrderItemStatus.CANCELLED && !item.isFree,
+        )
         .map((item: any) => ({
           ...item,
           orderId: order._id,
@@ -1379,7 +2006,10 @@ export class OrdersService {
         })),
     );
     const subtotal = billItems.reduce((sum, item) => sum + item.subtotal, 0);
-    const totalQuantity = billItems.reduce((sum, item) => sum + item.quantity, 0);
+    const totalQuantity = billItems.reduce(
+      (sum, item) => sum + item.quantity,
+      0,
+    );
 
     return {
       table: {
@@ -1390,7 +2020,8 @@ export class OrdersService {
       session: {
         _id: (tableSession._id as Types.ObjectId).toString(),
         status: tableSession.status,
-        paymentStatus: tableSession.paymentStatus || TableSessionPaymentStatus.UNPAID,
+        paymentStatus:
+          tableSession.paymentStatus || TableSessionPaymentStatus.UNPAID,
         paymentMethod: tableSession.paymentMethod,
         paidAt: tableSession.paidAt,
         openedAt: tableSession.openedAt,
@@ -1428,7 +2059,10 @@ export class OrdersService {
         note: item.note,
         status: item.status,
         isFree,
-        subtotal: isFree || item.status === OrderItemStatus.CANCELLED ? 0 : quantity * price,
+        subtotal:
+          isFree || item.status === OrderItemStatus.CANCELLED
+            ? 0
+            : quantity * price,
       };
     });
 
@@ -1472,11 +2106,18 @@ export class OrdersService {
     type: CustomerRequestType,
     requestedMethod?: CustomerPaymentMethod,
   ): CustomerPaymentMethod | undefined {
-    if (requestedMethod && Object.values(CustomerPaymentMethod).includes(requestedMethod)) {
+    if (
+      requestedMethod &&
+      Object.values(CustomerPaymentMethod).includes(requestedMethod)
+    ) {
       return requestedMethod;
     }
-    if (type === CustomerRequestType.PAY_CASH) return CustomerPaymentMethod.CASH;
-    if (type === CustomerRequestType.PAY_TRANSFER || type === CustomerRequestType.PRINT_BILL) {
+    if (type === CustomerRequestType.PAY_CASH)
+      return CustomerPaymentMethod.CASH;
+    if (
+      type === CustomerRequestType.PAY_TRANSFER ||
+      type === CustomerRequestType.PRINT_BILL
+    ) {
       return CustomerPaymentMethod.TRANSFER;
     }
     return undefined;
@@ -1487,18 +2128,23 @@ export class OrdersService {
     tableSession: TableSessionDocument,
     summary: any,
   ) {
-    const amount = Number(summary?.bill?.finalAmount || summary?.bill?.subtotal || 0);
+    const amount = Number(
+      summary?.bill?.finalAmount || summary?.bill?.subtotal || 0,
+    );
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new BadRequestException('No active bill to pay');
     }
 
-    const existingPayment = await this.customerPaymentModel.findOne({
-      tenantId: tenantObjectId,
-      sessionId: tableSession._id,
-      provider: CustomerPaymentProvider.PAYOS,
-      status: { $in: [CustomerPaymentStatus.PENDING, CustomerPaymentStatus.PAID] },
-      amount,
-    })
+    const existingPayment = await this.customerPaymentModel
+      .findOne({
+        tenantId: tenantObjectId,
+        sessionId: tableSession._id,
+        provider: CustomerPaymentProvider.PAYOS,
+        status: {
+          $in: [CustomerPaymentStatus.PENDING, CustomerPaymentStatus.PAID],
+        },
+        amount,
+      })
       .sort({ createdAt: -1 })
       .exec();
 
@@ -1509,7 +2155,9 @@ export class OrdersService {
     this.assertPayosConfigured();
 
     const orderCode = await this.generateUniquePayosOrderCode();
-    const description = this.buildPayosDescription((tableSession._id as Types.ObjectId).toString());
+    const description = this.buildPayosDescription(
+      (tableSession._id as Types.ObjectId).toString(),
+    );
     const payment = new this.customerPaymentModel({
       tenantId: tenantObjectId,
       tableId: tableSession.tableId,
@@ -1534,11 +2182,17 @@ export class OrdersService {
         description,
       });
       savedPayment.providerResponse = providerResponse;
-      savedPayment.providerPaymentLinkId = this.getOptionalString(providerResponse.paymentLinkId);
-      savedPayment.checkoutUrl = this.getOptionalString(providerResponse.checkoutUrl);
+      savedPayment.providerPaymentLinkId = this.getOptionalString(
+        providerResponse.paymentLinkId,
+      );
+      savedPayment.checkoutUrl = this.getOptionalString(
+        providerResponse.checkoutUrl,
+      );
       savedPayment.qrCode = this.getOptionalString(providerResponse.qrCode);
 
-      const providerStatus = this.getOptionalString(providerResponse.status)?.toUpperCase();
+      const providerStatus = this.getOptionalString(
+        providerResponse.status,
+      )?.toUpperCase();
       if (providerStatus === CustomerPaymentStatus.PAID) {
         savedPayment.status = CustomerPaymentStatus.PAID;
         savedPayment.paidAt = new Date();
@@ -1554,7 +2208,11 @@ export class OrdersService {
   }
 
   private assertPayosConfigured() {
-    if (!process.env.PAYOS_CLIENT_ID || !process.env.PAYOS_API_KEY || !process.env.PAYOS_CHECKSUM_KEY) {
+    if (
+      !process.env.PAYOS_CLIENT_ID ||
+      !process.env.PAYOS_API_KEY ||
+      !process.env.PAYOS_CHECKSUM_KEY
+    ) {
       throw new BadRequestException('payOS is not configured');
     }
   }
@@ -1562,7 +2220,9 @@ export class OrdersService {
   private async generateUniquePayosOrderCode(): Promise<number> {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const orderCode = Date.now() * 1000 + Math.floor(Math.random() * 1000);
-      const exists = await this.customerPaymentModel.exists({ orderCode }).exec();
+      const exists = await this.customerPaymentModel
+        .exists({ orderCode })
+        .exec();
       if (!exists) return orderCode;
     }
     throw new BadRequestException('Unable to generate payment order code');
@@ -1582,38 +2242,50 @@ export class OrdersService {
       orderCode: payload.orderCode,
       amount: payload.amount,
       description: payload.description,
-      returnUrl: process.env.PAYOS_RETURN_URL || 'https://web-khach-ts.vercel.app/home',
-      cancelUrl: process.env.PAYOS_CANCEL_URL || 'https://web-khach-ts.vercel.app/home',
+      returnUrl:
+        process.env.PAYOS_RETURN_URL || 'https://web-khach-ts.vercel.app/home',
+      cancelUrl:
+        process.env.PAYOS_CANCEL_URL || 'https://web-khach-ts.vercel.app/home',
     };
     requestBody.signature = this.createPayosSignature(requestBody, checksumKey);
 
-    const response = await fetch('https://api-merchant.payos.vn/v2/payment-requests', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-client-id': process.env.PAYOS_CLIENT_ID || '',
-        'x-api-key': process.env.PAYOS_API_KEY || '',
+    const response = await fetch(
+      'https://api-merchant.payos.vn/v2/payment-requests',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-client-id': process.env.PAYOS_CLIENT_ID || '',
+          'x-api-key': process.env.PAYOS_API_KEY || '',
+        },
+        body: JSON.stringify(requestBody),
       },
-      body: JSON.stringify(requestBody),
-    });
+    );
 
     const responseBody = await response.json().catch(() => ({}));
     const responseRecord = this.asRecord(responseBody);
     const responseCode = this.getOptionalString(responseRecord.code);
 
     if (!response.ok || (responseCode && responseCode !== '00')) {
-      const message = this.getOptionalString(responseRecord.desc)
-        || this.getOptionalString(responseRecord.message)
-        || 'Unable to create payOS payment';
+      const message =
+        this.getOptionalString(responseRecord.desc) ||
+        this.getOptionalString(responseRecord.message) ||
+        'Unable to create payOS payment';
       throw new BadRequestException(message);
     }
 
     return this.asRecord(responseRecord.data);
   }
 
-  private createPayosSignature(data: Record<string, unknown>, checksumKey: string): string {
+  private createPayosSignature(
+    data: Record<string, unknown>,
+    checksumKey: string,
+  ): string {
     const rawData = Object.keys(data)
-      .filter((key) => key !== 'signature' && data[key] !== undefined && data[key] !== null)
+      .filter(
+        (key) =>
+          key !== 'signature' && data[key] !== undefined && data[key] !== null,
+      )
       .sort()
       .map((key) => `${key}=${this.stringifyPayosValue(data[key])}`)
       .join('&');
@@ -1654,27 +2326,39 @@ export class OrdersService {
     return typeof value === 'string' && value.trim() ? value : undefined;
   }
 
-  private async buildOrderItems(tenantId: string, itemDtos: any[]): Promise<PreparedOrderItem[]> {
+  private async buildOrderItems(
+    tenantId: string,
+    itemDtos: any[],
+  ): Promise<PreparedOrderItem[]> {
     const normalizedItems = this.normalizeIncomingOrderItems(itemDtos);
-    const preparedItems = await this.convertToPreparedOrderItems(tenantId, normalizedItems);
+    const preparedItems = await this.convertToPreparedOrderItems(
+      tenantId,
+      normalizedItems,
+    );
     await this.validateOrderStockAvailability(tenantId, preparedItems);
     return preparedItems;
   }
 
-  private normalizeIncomingOrderItems(itemDtos: any[]): NormalizedOrderInputItem[] {
+  private normalizeIncomingOrderItems(
+    itemDtos: any[],
+  ): NormalizedOrderInputItem[] {
     if (!Array.isArray(itemDtos) || itemDtos.length === 0) {
       throw new BadRequestException('Order must contain at least one item');
     }
 
     return itemDtos.map((itemDto) => {
-      const requestedId = String(itemDto?.menuItemId || itemDto?.itemId || '').trim();
+      const requestedId = String(
+        itemDto?.menuItemId || itemDto?.itemId || '',
+      ).trim();
       const quantity = Number(itemDto?.quantity);
 
       if (!requestedId) {
         throw new BadRequestException('Menu item id is required');
       }
       if (!Number.isFinite(quantity) || quantity <= 0) {
-        throw new BadRequestException(`Invalid quantity for item ${requestedId}`);
+        throw new BadRequestException(
+          `Invalid quantity for item ${requestedId}`,
+        );
       }
 
       return {
@@ -1690,27 +2374,53 @@ export class OrdersService {
     normalizedItems: NormalizedOrderInputItem[],
     baseItems?: any[],
   ): Promise<PreparedOrderItem[]> {
-    const requestedIds = Array.from(new Set(normalizedItems.map((item) => item.requestedId)));
-    const menuByRequestedId = await this.resolveMenuByRequestedIds(tenantId, requestedIds);
+    const requestedIds = Array.from(
+      new Set(normalizedItems.map((item) => item.requestedId)),
+    );
+    const menuByRequestedId = await this.resolveMenuByRequestedIds(
+      tenantId,
+      requestedIds,
+    );
     const recipeByMenuId = await this.getActiveRecipeByMenuIds(
       tenantId,
-      Array.from(new Set(Array.from(menuByRequestedId.values()).map((menuItem) => menuItem._id.toString()))),
+      Array.from(
+        new Set(
+          Array.from(menuByRequestedId.values()).map((menuItem) =>
+            menuItem._id.toString(),
+          ),
+        ),
+      ),
     );
 
     return normalizedItems.map((item, index) => {
       const menuItem = menuByRequestedId.get(item.requestedId);
       if (!menuItem) {
-        throw new NotFoundException(`Menu item ${item.requestedId} not found or unavailable`);
+        throw new NotFoundException(
+          `Menu item ${item.requestedId} not found or unavailable`,
+        );
       }
 
       const recipe = recipeByMenuId.get(menuItem._id.toString());
-      if (!recipe || !Array.isArray(recipe.ingredients) || recipe.ingredients.length === 0) {
-        throw this.buildMissingRecipeException(menuItem._id.toString(), menuItem.name);
+      if (
+        !recipe ||
+        !Array.isArray(recipe.ingredients) ||
+        recipe.ingredients.length === 0
+      ) {
+        throw this.buildMissingRecipeException(
+          menuItem._id.toString(),
+          menuItem.name,
+        );
       }
 
-      const recipeSnapshot = this.buildRecipeSnapshot(recipe.ingredients, item.quantity);
+      const recipeSnapshot = this.buildRecipeSnapshot(
+        recipe.ingredients,
+        item.quantity,
+      );
       if (recipeSnapshot.length === 0) {
-        throw this.buildMissingRecipeException(menuItem._id.toString(), menuItem.name);
+        throw this.buildMissingRecipeException(
+          menuItem._id.toString(),
+          menuItem.name,
+        );
       }
 
       const baseItem = baseItems?.[index];
@@ -1718,12 +2428,18 @@ export class OrdersService {
 
       return {
         itemId: menuItem._id as Types.ObjectId,
-        legacyInventoryItemId: menuItem.legacyInventoryItemId as Types.ObjectId | undefined,
+        legacyInventoryItemId: menuItem.legacyInventoryItemId as
+          | Types.ObjectId
+          | undefined,
         menuItemNameSnapshot: menuItem.name,
         quantity: item.quantity,
-        price: Number.isFinite(basePrice) && basePrice >= 0 ? basePrice : menuItem.sellingPrice,
+        price:
+          Number.isFinite(basePrice) && basePrice >= 0
+            ? basePrice
+            : menuItem.sellingPrice,
         note: item.note,
-        status: (baseItem?.status as OrderItemStatus) || OrderItemStatus.PENDING,
+        status:
+          (baseItem?.status as OrderItemStatus) || OrderItemStatus.PENDING,
         isFree: Boolean(baseItem?.isFree),
         cancelledAt: baseItem?.cancelledAt,
         cancelledBy: baseItem?.cancelledBy,
@@ -1745,11 +2461,13 @@ export class OrdersService {
       .map((id) => new Types.ObjectId(id));
 
     const directMenuItems = validRequestedObjectIds.length
-      ? await this.menuItemModel.find({
-          tenantId: tenantObjectId,
-          _id: { $in: validRequestedObjectIds },
-          status: MenuItemStatus.ACTIVE,
-        }).exec()
+      ? await this.menuItemModel
+          .find({
+            tenantId: tenantObjectId,
+            _id: { $in: validRequestedObjectIds },
+            status: MenuItemStatus.ACTIVE,
+          })
+          .exec()
       : [];
 
     directMenuItems.forEach((menuItem) => {
@@ -1762,11 +2480,13 @@ export class OrdersService {
       .map((id) => new Types.ObjectId(id));
 
     const legacyMappedMenuItems = unresolvedObjectIds.length
-      ? await this.menuItemModel.find({
-          tenantId: tenantObjectId,
-          legacyInventoryItemId: { $in: unresolvedObjectIds },
-          status: MenuItemStatus.ACTIVE,
-        }).exec()
+      ? await this.menuItemModel
+          .find({
+            tenantId: tenantObjectId,
+            legacyInventoryItemId: { $in: unresolvedObjectIds },
+            status: MenuItemStatus.ACTIVE,
+          })
+          .exec()
       : [];
 
     legacyMappedMenuItems.forEach((menuItem) => {
@@ -1782,10 +2502,13 @@ export class OrdersService {
         .map((id) => new Types.ObjectId(id));
 
       if (unresolvedObjectIdsForInventory.length > 0) {
-        const linkedLegacyMenuItems = await this.menuItemModel.find({
-          tenantId: tenantObjectId,
-          legacyInventoryItemId: { $in: unresolvedObjectIdsForInventory },
-        }).select({ legacyInventoryItemId: 1 }).exec();
+        const linkedLegacyMenuItems = await this.menuItemModel
+          .find({
+            tenantId: tenantObjectId,
+            legacyInventoryItemId: { $in: unresolvedObjectIdsForInventory },
+          })
+          .select({ legacyInventoryItemId: 1 })
+          .exec();
 
         const alreadyLinkedInventoryIdSet = new Set(
           linkedLegacyMenuItems
@@ -1793,11 +2516,13 @@ export class OrdersService {
             .filter((value): value is string => Boolean(value)),
         );
 
-        const inventoryItems = await this.itemModel.find({
-          tenantId: tenantObjectId,
-          _id: { $in: unresolvedObjectIdsForInventory },
-          status: ItemStatus.ACTIVE,
-        }).exec();
+        const inventoryItems = await this.itemModel
+          .find({
+            tenantId: tenantObjectId,
+            _id: { $in: unresolvedObjectIdsForInventory },
+            status: ItemStatus.ACTIVE,
+          })
+          .exec();
 
         for (const inventoryItem of inventoryItems) {
           const inventoryId = inventoryItem._id.toString();
@@ -1816,24 +2541,38 @@ export class OrdersService {
     return result;
   }
 
-  private async getActiveRecipeByMenuIds(tenantId: string, menuIds: string[]): Promise<Map<string, MenuItemRecipeDocument>> {
+  private async getActiveRecipeByMenuIds(
+    tenantId: string,
+    menuIds: string[],
+  ): Promise<Map<string, MenuItemRecipeDocument>> {
     if (menuIds.length === 0) return new Map<string, MenuItemRecipeDocument>();
-    const recipes = await this.menuRecipeModel.find({
-      tenantId: new Types.ObjectId(tenantId),
-      menuItemId: { $in: menuIds.filter((id) => Types.ObjectId.isValid(id)).map((id) => new Types.ObjectId(id)) },
-      status: MenuRecipeStatus.ACTIVE,
-    }).exec();
+    const recipes = await this.menuRecipeModel
+      .find({
+        tenantId: new Types.ObjectId(tenantId),
+        menuItemId: {
+          $in: menuIds
+            .filter((id) => Types.ObjectId.isValid(id))
+            .map((id) => new Types.ObjectId(id)),
+        },
+        status: MenuRecipeStatus.ACTIVE,
+      })
+      .exec();
 
     const map = new Map<string, MenuItemRecipeDocument>();
     recipes.forEach((recipe) => map.set(recipe.menuItemId.toString(), recipe));
     return map;
   }
 
-  private buildRecipeSnapshot(ingredients: MenuRecipeIngredient[], quantity: number): PreparedOrderItem['recipeSnapshot'] {
+  private buildRecipeSnapshot(
+    ingredients: MenuRecipeIngredient[],
+    quantity: number,
+  ): PreparedOrderItem['recipeSnapshot'] {
     return ingredients.map((ingredient) => {
       const wastePercent = Number(ingredient.wastePercent) || 0;
       const wasteMultiplier = 1 + wastePercent / 100;
-      const totalRequiredQuantity = Number((ingredient.requiredQuantity * quantity * wasteMultiplier).toFixed(4));
+      const totalRequiredQuantity = Number(
+        (ingredient.requiredQuantity * quantity * wasteMultiplier).toFixed(4),
+      );
       return {
         inventoryItemId: ingredient.inventoryItemId as Types.ObjectId,
         ingredientNameSnapshot: ingredient.inventoryItemNameSnapshot,
@@ -1857,20 +2596,33 @@ export class OrdersService {
 
     const hasRecipeSnapshotForAllActiveItems = items
       .filter((item) => item.status !== OrderItemStatus.CANCELLED)
-      .every((item) => Array.isArray(item.recipeSnapshot) && item.recipeSnapshot.length > 0 && item.menuItemNameSnapshot);
+      .every(
+        (item) =>
+          Array.isArray(item.recipeSnapshot) &&
+          item.recipeSnapshot.length > 0 &&
+          item.menuItemNameSnapshot,
+      );
 
     let preparedItems: PreparedOrderItem[];
 
     if (hasRecipeSnapshotForAllActiveItems) {
       preparedItems = items as PreparedOrderItem[];
     } else {
-      const activeBaseItems = items.filter((item) => item.status !== OrderItemStatus.CANCELLED);
+      const activeBaseItems = items.filter(
+        (item) => item.status !== OrderItemStatus.CANCELLED,
+      );
       const normalizedItems = activeBaseItems.map((item) => ({
-        requestedId: String((item as any).itemId?._id || (item as any).itemId || '').trim(),
+        requestedId: String(
+          (item as any).itemId?._id || (item as any).itemId || '',
+        ).trim(),
         quantity: Number(item.quantity),
         note: item.note,
       }));
-      const preparedActiveItems = await this.convertToPreparedOrderItems(tenantId, normalizedItems, activeBaseItems);
+      const preparedActiveItems = await this.convertToPreparedOrderItems(
+        tenantId,
+        normalizedItems,
+        activeBaseItems,
+      );
       const cancelledItems = items
         .filter((item) => item.status === OrderItemStatus.CANCELLED)
         .map((item) => item as PreparedOrderItem);
@@ -1886,7 +2638,9 @@ export class OrdersService {
     return preparedItems;
   }
 
-  private buildIngredientRequirements(items: PreparedOrderItem[]): IngredientRequirement[] {
+  private buildIngredientRequirements(
+    items: PreparedOrderItem[],
+  ): IngredientRequirement[] {
     const requirementMap = new Map<string, IngredientRequirement>();
 
     items.forEach((item) => {
@@ -1899,11 +2653,14 @@ export class OrdersService {
 
         const inventoryItemId = ingredient.inventoryItemId.toString();
         const requestedQuantity = Number(ingredient.totalRequiredQuantity);
-        if (!Number.isFinite(requestedQuantity) || requestedQuantity <= 0) return;
+        if (!Number.isFinite(requestedQuantity) || requestedQuantity <= 0)
+          return;
 
         const existing = requirementMap.get(inventoryItemId);
         if (existing) {
-          existing.totalRequestedQuantity = Number((existing.totalRequestedQuantity + requestedQuantity).toFixed(4));
+          existing.totalRequestedQuantity = Number(
+            (existing.totalRequestedQuantity + requestedQuantity).toFixed(4),
+          );
           existing.contributors.push({
             menuItemId,
             menuItemName,
@@ -1933,6 +2690,80 @@ export class OrdersService {
     return Array.from(requirementMap.values());
   }
 
+  private async attachCostSnapshotsToItems(
+    tenantId: string,
+    items: PreparedOrderItem[],
+    session?: ClientSession,
+  ): Promise<PreparedOrderItem[]> {
+    const ingredientIds = Array.from(
+      new Set(
+        items.flatMap((item) =>
+          (item.recipeSnapshot || [])
+            .filter((ingredient) => !ingredient.isOptional)
+            .map((ingredient) => ingredient.inventoryItemId.toString()),
+        ),
+      ),
+    )
+      .filter((id) => Types.ObjectId.isValid(id))
+      .map((id) => new Types.ObjectId(id));
+
+    const inventoryItems = ingredientIds.length
+      ? await this.itemModel
+          .find({
+            tenantId: new Types.ObjectId(tenantId),
+            _id: { $in: ingredientIds },
+          })
+          .session(session || null)
+          .exec()
+      : [];
+
+    const inventoryById = new Map<string, InventoryItemDocument>();
+    inventoryItems.forEach((inventoryItem) => {
+      inventoryById.set(inventoryItem._id.toString(), inventoryItem);
+    });
+
+    return items.map((item) => {
+      if (item.status === OrderItemStatus.CANCELLED) return item;
+
+      let totalCost = 0;
+      const ingredients = (item.recipeSnapshot || [])
+        .filter((ingredient) => !ingredient.isOptional)
+        .map((ingredient) => {
+          const inventoryItem = inventoryById.get(
+            ingredient.inventoryItemId.toString(),
+          );
+          const requiredQuantity = Number(ingredient.totalRequiredQuantity);
+          const costPriceSnapshot = Math.round(
+            Number(inventoryItem?.costPrice || 0),
+          );
+          const costAmount = Math.round(requiredQuantity * costPriceSnapshot);
+          totalCost += costAmount;
+
+          return {
+            inventoryItemId: ingredient.inventoryItemId,
+            nameSnapshot:
+              ingredient.ingredientNameSnapshot ||
+              inventoryItem?.name ||
+              ingredient.inventoryItemId.toString(),
+            requiredQuantity,
+            unit: ingredient.unitSnapshot,
+            costPriceSnapshot,
+            costAmount,
+          };
+        });
+
+      return {
+        ...item,
+        costSnapshot: {
+          totalCost,
+          ingredients,
+          costEstimated: false,
+          missingCost: ingredients.length === 0,
+        },
+      };
+    });
+  }
+
   private async validateIngredientRequirements(
     tenantId: string,
     requirements: IngredientRequirement[],
@@ -1944,10 +2775,13 @@ export class OrdersService {
       .map((id) => new Types.ObjectId(id));
 
     const inventoryItems = ingredientObjectIds.length
-      ? await this.itemModel.find({
-          tenantId: new Types.ObjectId(tenantId),
-          _id: { $in: ingredientObjectIds },
-        }).session(session || null).exec()
+      ? await this.itemModel
+          .find({
+            tenantId: new Types.ObjectId(tenantId),
+            _id: { $in: ingredientObjectIds },
+          })
+          .session(session || null)
+          .exec()
       : [];
 
     const inventoryById = new Map<string, InventoryItemDocument>();
@@ -1958,7 +2792,10 @@ export class OrdersService {
     const insufficientItems: any[] = [];
     requirements.forEach((requirement) => {
       const inventoryItem = inventoryById.get(requirement.inventoryItemId);
-      const availableQuantity = inventoryItem?.status === ItemStatus.ACTIVE ? Number(inventoryItem.stock || 0) : 0;
+      const availableQuantity =
+        inventoryItem?.status === ItemStatus.ACTIVE
+          ? Number(inventoryItem.stock || 0)
+          : 0;
       const isEnough = availableQuantity >= requirement.totalRequestedQuantity;
       if (isEnough) return;
 
@@ -1985,7 +2822,10 @@ export class OrdersService {
     }
   }
 
-  private buildMissingRecipeException(menuItemId: string, menuItemName: string) {
+  private buildMissingRecipeException(
+    menuItemId: string,
+    menuItemName: string,
+  ) {
     return new BadRequestException({
       code: 'MISSING_MENU_RECIPE',
       message: 'Mon nay chua co cong thuc nguyen lieu',
@@ -2019,18 +2859,24 @@ export class OrdersService {
       };
     }
 
-    const tenant = await this.tenantModel.findById(tenantId).session(session || null).exec();
+    const tenant = await this.tenantModel
+      .findById(tenantId)
+      .session(session || null)
+      .exec();
     const vatRate = tenant?.settings?.vatRate || 0;
     const serviceChargeRate = tenant?.settings?.serviceCharge || 0;
 
     const subtotal = order.totalAmount;
-    const discountAmount = discountType === 'PERCENT'
-      ? Math.round(subtotal * (discount / 100))
-      : discount;
+    const discountAmount =
+      discountType === 'PERCENT'
+        ? Math.round(subtotal * (discount / 100))
+        : discount;
 
     const amountAfterDiscount = Math.max(0, subtotal - discountAmount);
     const vatAmount = Math.round(amountAfterDiscount * (vatRate / 100));
-    const serviceChargeAmount = Math.round(amountAfterDiscount * (serviceChargeRate / 100));
+    const serviceChargeAmount = Math.round(
+      amountAfterDiscount * (serviceChargeRate / 100),
+    );
     const finalAmount = amountAfterDiscount + vatAmount + serviceChargeAmount;
 
     return {
@@ -2042,25 +2888,35 @@ export class OrdersService {
   }
 
   private calculateTotalAmount(items: any[]): number {
-    return items.reduce((sum, item) => sum + (item.quantity * item.price), 0);
+    return items.reduce((sum, item) => sum + item.quantity * item.price, 0);
   }
 
   private isMongoTransactionUnsupportedError(error: unknown): boolean {
-    const fallback = { message: '', codeName: '', code: undefined as number | undefined };
-    const details = typeof error === 'object' && error !== null
-      ? {
-          message: String((error as any).message || ''),
-          codeName: String((error as any).codeName || ''),
-          code: typeof (error as any).code === 'number' ? (error as any).code : undefined,
-        }
-      : fallback;
+    const fallback = {
+      message: '',
+      codeName: '',
+      code: undefined as number | undefined,
+    };
+    const details =
+      typeof error === 'object' && error !== null
+        ? {
+            message: String((error as any).message || ''),
+            codeName: String((error as any).codeName || ''),
+            code:
+              typeof (error as any).code === 'number'
+                ? (error as any).code
+                : undefined,
+          }
+        : fallback;
 
     const message = details.message.toLowerCase();
     return (
       details.code === 20 ||
       details.codeName.toLowerCase() === 'illegaloperation' ||
-      message.includes('transaction numbers are only allowed on a replica set member or mongos') ||
-      message.includes('replica set') && message.includes('transaction')
+      message.includes(
+        'transaction numbers are only allowed on a replica set member or mongos',
+      ) ||
+      (message.includes('replica set') && message.includes('transaction'))
     );
   }
 }

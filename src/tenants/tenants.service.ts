@@ -146,7 +146,7 @@ export class TenantsService implements OnModuleInit {
       mustChangePassword: true,
     });
     const savedAdmin = await adminUser.save();
-    const { passwordHash: _passwordHash, localOtpCode, localOtpExpires, ...safeAdmin } = savedAdmin.toObject();
+    const { passwordHash: _passwordHash, localOtpCode, localOtpExpires, localOtpAttempts, ...safeAdmin } = savedAdmin.toObject();
 
     return {
       tenant: savedTenant,
@@ -337,6 +337,7 @@ export class TenantsService implements OnModuleInit {
     admin.trustedDevices = [];
     admin.localOtpCode = undefined;
     admin.localOtpExpires = undefined;
+    admin.localOtpAttempts = 0;
     await admin.save();
 
     return { tempPassword };

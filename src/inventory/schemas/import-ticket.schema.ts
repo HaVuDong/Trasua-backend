@@ -1,5 +1,9 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
+import {
+  integerVndValidator,
+  INTEGER_VND_MESSAGE,
+} from '../../common/domain/money';
 
 export type ImportTicketDocument = ImportTicket & Document;
 
@@ -11,7 +15,11 @@ export class ImportItem {
   @Prop({ required: true, min: 1 })
   quantity: number;
 
-  @Prop({ required: true, min: 0 })
+  @Prop({
+    required: true,
+    min: 0,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   costPrice: number;
 }
 

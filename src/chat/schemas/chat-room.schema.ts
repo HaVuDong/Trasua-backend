@@ -19,6 +19,15 @@ export class ChatRoom {
 
   @Prop({ type: Types.ObjectId, ref: 'User' })
   createdBy?: Types.ObjectId;
+
+  @Prop()
+  archivedAt?: Date;
+
+  @Prop()
+  deletedAt?: Date;
 }
 
 export const ChatRoomSchema = SchemaFactory.createForClass(ChatRoom);
+
+ChatRoomSchema.index({ tenantId: 1, members: 1 });
+ChatRoomSchema.index({ tenantId: 1, archivedAt: 1, deletedAt: 1 });

@@ -3,10 +3,16 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { ReportsService } from './reports.service';
 import { ReportsController } from './reports.controller';
 import { Order, OrderSchema } from '../orders/schemas/order.schema';
-import { Attendance, AttendanceSchema } from '../attendance/schemas/attendance.schema';
+import {
+  Attendance,
+  AttendanceSchema,
+} from '../attendance/schemas/attendance.schema';
 import { Payroll, PayrollSchema } from '../attendance/schemas/payroll.schema';
 import { User, UserSchema } from '../users/schemas/user.schema';
-import { InventoryItem, InventoryItemSchema } from '../inventory/schemas/inventory.schema';
+import {
+  InventoryItem,
+  InventoryItemSchema,
+} from '../inventory/schemas/inventory.schema';
 import { MenuItem, MenuItemSchema } from '../menu/schemas/menu-item.schema';
 
 @Module({

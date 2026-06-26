@@ -1,10 +1,20 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { User, UserDocument, Role, UserStatus } from './schemas/user.schema';
 import { CreateUserDto } from './dto/create-user.dto';
 import { Tenant, TenantDocument } from '../tenants/schemas/tenant.schema';
 import { getSaasPlan } from '../billing/saas-plans';
+import { Permission } from '../common/permissions/permission.enum';
+import {
+  getEffectivePermissions,
+  normalizePermissions,
+  ROLE_DEFAULT_PERMISSIONS,
+} from '../common/permissions/permissions';
 // @ts-ignore
 import * as bcrypt from 'bcrypt';
 
@@ -21,7 +31,9 @@ export class UsersService {
 
   private assertCanCreateRole(actorRole: Role, targetRole: Role) {
     if (targetRole === Role.SYSTEM_OWNER) {
-      throw new BadRequestException('Cannot create System Owner from staff management');
+      throw new BadRequestException(
+        'Cannot create System Owner from staff management',
+      );
     }
 
     const allowedByRole: Record<string, Role[]> = {
@@ -39,23 +51,42 @@ export class UsersService {
     return Math.random().toString(36).slice(-10);
   }
 
+  getPermissionCatalog() {
+    return {
+      permissions: Object.values(Permission),
+      roleDefaults: ROLE_DEFAULT_PERMISSIONS,
+    };
+  }
+
   private async assertStaffLimit(tenantId: string) {
     if (!this.tenantModel) return;
-    const tenant = await this.tenantModel.findById(tenantId).select('subscription').lean().exec();
+    const tenant = await this.tenantModel
+      .findById(tenantId)
+      .select('subscription')
+      .lean()
+      .exec();
     if (!tenant) throw new BadRequestException('Tenant not found');
     const plan = getSaasPlan((tenant as any).subscription?.plan);
-    const activeUsers = await this.userModel.countDocuments({
-      tenantId: new Types.ObjectId(tenantId),
-      role: { $ne: Role.SYSTEM_OWNER },
-      status: { $ne: UserStatus.DELETED },
-    }).exec();
+    const activeUsers = await this.userModel
+      .countDocuments({
+        tenantId: new Types.ObjectId(tenantId),
+        role: { $ne: Role.SYSTEM_OWNER },
+        status: { $ne: UserStatus.DELETED },
+      })
+      .exec();
 
     if (activeUsers >= plan.maxStaff) {
-      throw new BadRequestException(`Goi ${plan.id} chi cho phep toi da ${plan.maxStaff} tai khoan`);
+      throw new BadRequestException(
+        `Goi ${plan.id} chi cho phep toi da ${plan.maxStaff} tai khoan`,
+      );
     }
   }
 
-  async create(tenantId: string, createUserDto: CreateUserDto, actorRole: Role): Promise<any> {
+  async create(
+    tenantId: string,
+    createUserDto: CreateUserDto,
+    actorRole: Role,
+  ): Promise<any> {
     if (!tenantId) {
       throw new BadRequestException('tenantId is required');
     }
@@ -74,7 +105,8 @@ export class UsersService {
     }
 
     const phone = createUserDto.phone?.trim() || undefined;
-    const tempPassword = createUserDto.password?.trim() || this.generateTempPassword();
+    const tempPassword =
+      createUserDto.password?.trim() || this.generateTempPassword();
     const passwordHash = await bcrypt.hash(tempPassword, 10);
     const newUser = new this.userModel({
       ...createUserDto,
@@ -89,12 +121,20 @@ export class UsersService {
       mustChangePassword: true,
     });
     const saved = await newUser.save();
-    const { passwordHash: _passwordHash, localOtpCode, localOtpExpires, ...safeUser } = saved.toObject();
+    const {
+      passwordHash: _passwordHash,
+      localOtpCode,
+      localOtpExpires,
+      localOtpAttempts,
+      ...safeUser
+    } = saved.toObject();
     return { ...safeUser, tempPassword };
   }
 
   async findAllByTenant(tenantId: string): Promise<User[]> {
-    return this.userModel.find({ tenantId, role: { $ne: Role.SYSTEM_OWNER } }).exec();
+    return this.userModel
+      .find({ tenantId, role: { $ne: Role.SYSTEM_OWNER } })
+      .exec();
   }
 
   async findOne(tenantId: string, userId: string): Promise<User> {
@@ -103,20 +143,28 @@ export class UsersService {
     return user;
   }
 
-  async updateUser(tenantId: string, userId: string, updates: any): Promise<User> {
+  async updateUser(
+    tenantId: string,
+    userId: string,
+    updates: any,
+  ): Promise<User> {
     // Prevent modifying critical fields directly
     delete updates.passwordHash;
     delete updates.tenantId;
     delete updates._id;
     delete updates.role; // Use changeRole for this
     delete updates.trustedDevices;
+    delete updates.permissionOverrides;
+    delete updates.permissionVersion;
 
     if (updates.email !== undefined) {
       const email = this.normalizeEmail(updates.email);
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         throw new BadRequestException('Email khong hop le');
       }
-      const existingEmail = await this.userModel.findOne({ email, _id: { $ne: new Types.ObjectId(userId) } }).exec();
+      const existingEmail = await this.userModel
+        .findOne({ email, _id: { $ne: new Types.ObjectId(userId) } })
+        .exec();
       if (existingEmail) {
         throw new BadRequestException('Email da duoc su dung');
       }
@@ -128,13 +176,22 @@ export class UsersService {
     }
 
     // Handle salary config separately
-    if (updates.baseHourly !== undefined || updates.baseShift !== undefined || updates.overtimeMultiplier !== undefined) {
-      const user = await this.userModel.findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) }).exec();
+    if (
+      updates.baseHourly !== undefined ||
+      updates.baseShift !== undefined ||
+      updates.overtimeMultiplier !== undefined
+    ) {
+      const user = await this.userModel
+        .findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) })
+        .exec();
       if (!user) throw new NotFoundException('User not found');
       if (!user.salaryConfig) user.salaryConfig = {} as any;
-      if (updates.baseHourly !== undefined) user.salaryConfig!.baseHourly = updates.baseHourly;
-      if (updates.baseShift !== undefined) user.salaryConfig!.baseShift = updates.baseShift;
-      if (updates.overtimeMultiplier !== undefined) user.salaryConfig!.overtimeMultiplier = updates.overtimeMultiplier;
+      if (updates.baseHourly !== undefined)
+        user.salaryConfig!.baseHourly = updates.baseHourly;
+      if (updates.baseShift !== undefined)
+        user.salaryConfig!.baseShift = updates.baseShift;
+      if (updates.overtimeMultiplier !== undefined)
+        user.salaryConfig!.overtimeMultiplier = updates.overtimeMultiplier;
       delete updates.baseHourly;
       delete updates.baseShift;
       delete updates.overtimeMultiplier;
@@ -144,17 +201,108 @@ export class UsersService {
       return user.save();
     }
 
-    const updated = await this.userModel.findOneAndUpdate(
-      { _id: userId, tenantId: new Types.ObjectId(tenantId) },
-      { $set: updates },
-      { new: true },
-    ).exec();
+    const updated = await this.userModel
+      .findOneAndUpdate(
+        { _id: userId, tenantId: new Types.ObjectId(tenantId) },
+        { $set: updates },
+        { new: true },
+      )
+      .exec();
     if (!updated) throw new NotFoundException('User not found');
     return updated;
   }
 
-  async resetPassword(tenantId: string, userId: string): Promise<{ tempPassword: string }> {
-    const user = await this.userModel.findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) }).exec();
+  async updatePermissionOverrides(
+    tenantId: string,
+    targetUserId: string,
+    actorUserId: string,
+    overrides: {
+      allow?: Permission[] | string[];
+      deny?: Permission[] | string[];
+    },
+  ): Promise<User> {
+    const tenantObjectId = new Types.ObjectId(tenantId);
+    const target = await this.userModel
+      .findOne({ _id: targetUserId, tenantId: tenantObjectId })
+      .exec();
+    if (!target) throw new NotFoundException('User not found');
+    if (target.role === Role.SYSTEM_OWNER) {
+      throw new BadRequestException('Khong the sua quyen System Owner');
+    }
+
+    const allow = Array.from(new Set(normalizePermissions(overrides?.allow)));
+    const deny = Array.from(new Set(normalizePermissions(overrides?.deny)));
+    const denied = new Set(deny);
+    const normalized = {
+      allow: allow.filter((permission) => !denied.has(permission)),
+      deny,
+    };
+
+    await this.assertPermissionManageNotLockedOut(
+      tenantId,
+      target,
+      actorUserId,
+      normalized,
+    );
+
+    target.permissionOverrides = normalized;
+    target.permissionVersion = (target.permissionVersion || 1) + 1;
+    target.markModified('permissionOverrides');
+    return target.save();
+  }
+
+  private async assertPermissionManageNotLockedOut(
+    tenantId: string,
+    target: UserDocument,
+    actorUserId: string,
+    nextOverrides: { allow: Permission[]; deny: Permission[] },
+  ) {
+    const actorIsTarget = target._id.toString() === actorUserId;
+    const nextTargetPermissions = getEffectivePermissions(
+      target.role,
+      nextOverrides,
+    );
+    if (
+      actorIsTarget &&
+      !nextTargetPermissions.includes(Permission.STAFF_PERMISSION_MANAGE)
+    ) {
+      throw new BadRequestException(
+        'Khong the tu khoa quyen quan ly phan quyen',
+      );
+    }
+
+    const tenantUsers = await this.userModel
+      .find({
+        tenantId: new Types.ObjectId(tenantId),
+        status: { $ne: UserStatus.DELETED },
+        role: { $ne: Role.SYSTEM_OWNER },
+      })
+      .exec();
+
+    const hasAnyPermissionManager = tenantUsers.some((user) => {
+      const overrides =
+        user._id.toString() === target._id.toString()
+          ? nextOverrides
+          : user.permissionOverrides;
+      return getEffectivePermissions(user.role, overrides).includes(
+        Permission.STAFF_PERMISSION_MANAGE,
+      );
+    });
+
+    if (!hasAnyPermissionManager) {
+      throw new BadRequestException(
+        'Can giu lai it nhat mot tai khoan co quyen quan ly phan quyen',
+      );
+    }
+  }
+
+  async resetPassword(
+    tenantId: string,
+    userId: string,
+  ): Promise<{ tempPassword: string }> {
+    const user = await this.userModel
+      .findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!user) throw new NotFoundException('User not found');
 
     const tempPassword = Math.random().toString(36).slice(-8);
@@ -163,21 +311,29 @@ export class UsersService {
     user.trustedDevices = [];
     user.localOtpCode = undefined;
     user.localOtpExpires = undefined;
+    user.localOtpAttempts = 0;
     await user.save();
 
     return { tempPassword };
   }
 
-  async changePassword(userId: string, oldPassword: string, newPassword: string): Promise<{ message: string }> {
+  async changePassword(
+    userId: string,
+    oldPassword: string,
+    newPassword: string,
+  ): Promise<{ message: string }> {
     if (!newPassword || newPassword.length < 8) {
-      throw new BadRequestException('New password must have at least 8 characters');
+      throw new BadRequestException(
+        'New password must have at least 8 characters',
+      );
     }
 
     const user = await this.userModel.findById(userId).exec();
     if (!user) throw new NotFoundException('User not found');
 
     const matches = await bcrypt.compare(oldPassword, user.passwordHash);
-    if (!matches) throw new BadRequestException('Current password is incorrect');
+    if (!matches)
+      throw new BadRequestException('Current password is incorrect');
 
     user.passwordHash = await bcrypt.hash(newPassword, 10);
     user.mustChangePassword = false;
@@ -187,7 +343,9 @@ export class UsersService {
   }
 
   async lockUser(tenantId: string, userId: string): Promise<User> {
-    const user = await this.userModel.findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) }).exec();
+    const user = await this.userModel
+      .findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!user) throw new NotFoundException('User not found');
 
     user.status = UserStatus.LOCKED;
@@ -195,7 +353,9 @@ export class UsersService {
   }
 
   async unlockUser(tenantId: string, userId: string): Promise<User> {
-    const user = await this.userModel.findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) }).exec();
+    const user = await this.userModel
+      .findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!user) throw new NotFoundException('User not found');
 
     user.status = UserStatus.ACTIVE;
@@ -205,14 +365,21 @@ export class UsersService {
   }
 
   async softDeleteUser(tenantId: string, userId: string): Promise<User> {
-    const user = await this.userModel.findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) }).exec();
+    const user = await this.userModel
+      .findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!user) throw new NotFoundException('User not found');
 
     user.status = UserStatus.DELETED;
     return user.save();
   }
 
-  async changeRole(tenantId: string, userId: string, newRole: Role, actorRole: Role): Promise<User> {
+  async changeRole(
+    tenantId: string,
+    userId: string,
+    newRole: Role,
+    actorRole: Role,
+  ): Promise<User> {
     if (newRole === Role.SYSTEM_OWNER) {
       throw new BadRequestException('Cannot elevate to System Owner');
     }
@@ -223,15 +390,21 @@ export class UsersService {
 
     this.assertCanCreateRole(actorRole, newRole);
 
-    const user = await this.userModel.findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) }).exec();
+    const user = await this.userModel
+      .findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!user) throw new NotFoundException('User not found');
 
     user.role = newRole;
+    user.permissionVersion = (user.permissionVersion || 1) + 1;
     return user.save();
   }
 
   async getProfile(userId: string): Promise<any> {
-    const user = await this.userModel.findById(userId).select('-passwordHash -localOtpCode -localOtpExpires').exec();
+    const user = await this.userModel
+      .findById(userId)
+      .select('-passwordHash -localOtpCode -localOtpExpires -localOtpAttempts')
+      .exec();
     if (!user) throw new NotFoundException('User not found');
 
     // Calculate seniority
@@ -250,29 +423,50 @@ export class UsersService {
   }
 
   async getTrustedDevices(tenantId: string, userId: string): Promise<any[]> {
-    const user = await this.userModel.findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) }).exec();
+    const user = await this.userModel
+      .findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!user) throw new NotFoundException('User not found');
     return user.trustedDevices || [];
   }
 
-  async revokeDevice(tenantId: string, userId: string, deviceId: string): Promise<User> {
-    const user = await this.userModel.findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) }).exec();
+  async revokeDevice(
+    tenantId: string,
+    userId: string,
+    deviceId: string,
+  ): Promise<User> {
+    const user = await this.userModel
+      .findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!user) throw new NotFoundException('User not found');
 
-    user.trustedDevices = user.trustedDevices.filter(d => d.deviceId !== deviceId);
+    user.trustedDevices = user.trustedDevices.filter(
+      (d) => d.deviceId !== deviceId,
+    );
     user.markModified('trustedDevices');
     return user.save();
   }
 
-  async updateIpWhitelist(tenantId: string, targetUserId: string, ipWhitelist: string[]): Promise<User> {
-    const user = await this.userModel.findOne({ _id: targetUserId, tenantId }).exec();
+  async updateIpWhitelist(
+    tenantId: string,
+    targetUserId: string,
+    ipWhitelist: string[],
+  ): Promise<User> {
+    const user = await this.userModel
+      .findOne({ _id: targetUserId, tenantId })
+      .exec();
     if (!user) throw new NotFoundException('User not found');
     user.ipWhitelist = ipWhitelist;
     return user.save();
   }
 
-  async logoutAllSessions(tenantId: string, userId: string): Promise<{ message: string }> {
-    const user = await this.userModel.findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) }).exec();
+  async logoutAllSessions(
+    tenantId: string,
+    userId: string,
+  ): Promise<{ message: string }> {
+    const user = await this.userModel
+      .findOne({ _id: userId, tenantId: new Types.ObjectId(tenantId) })
+      .exec();
     if (!user) throw new NotFoundException('User not found');
 
     // Clear all trusted devices — forces re-authentication

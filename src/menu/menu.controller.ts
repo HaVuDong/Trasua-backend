@@ -1,7 +1,19 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Post,
+  Put,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
+import { RequirePermission } from '../common/decorators/permissions.decorator';
+import { Permission } from '../common/permissions/permission.enum';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Role } from '../users/schemas/user.schema';
 import { CreateMenuItemDto } from './dto/create-menu-item.dto';
@@ -21,18 +33,25 @@ export class MenuController {
     @Query('category') category?: string,
     @Query('search') search?: string,
   ) {
-    return this.menuService.findAllMenuItems(user.tenantId, { category, search });
+    return this.menuService.findAllMenuItems(user.tenantId, {
+      category,
+      search,
+    });
   }
 
   @Get('availability')
   @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
-  getAvailability(@CurrentUser() user: any, @Query('quantity') quantity?: string) {
+  getAvailability(
+    @CurrentUser() user: any,
+    @Query('quantity') quantity?: string,
+  ) {
     const normalizedQuantity = quantity ? Number(quantity) : 1;
     return this.menuService.getAvailability(user.tenantId, normalizedQuantity);
   }
 
   @Post()
   @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.MENU_MANAGE)
   create(@CurrentUser() user: any, @Body() dto: CreateMenuItemDto) {
     return this.menuService.createMenuItem(user.tenantId, user.userId, dto);
   }
@@ -45,12 +64,18 @@ export class MenuController {
 
   @Put(':id')
   @Roles(Role.ADMIN, Role.MANAGER)
-  update(@CurrentUser() user: any, @Param('id') id: string, @Body() dto: UpdateMenuItemDto) {
+  @RequirePermission(Permission.MENU_MANAGE)
+  update(
+    @CurrentUser() user: any,
+    @Param('id') id: string,
+    @Body() dto: UpdateMenuItemDto,
+  ) {
     return this.menuService.updateMenuItem(user.tenantId, user.userId, id, dto);
   }
 
   @Delete(':id')
   @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.MENU_MANAGE)
   remove(@CurrentUser() user: any, @Param('id') id: string) {
     return this.menuService.deleteMenuItem(user.tenantId, user.userId, id);
   }
@@ -63,13 +88,22 @@ export class MenuController {
 
   @Put(':id/recipe')
   @Roles(Role.ADMIN, Role.MANAGER)
-  upsertRecipe(@CurrentUser() user: any, @Param('id') id: string, @Body() dto: UpsertMenuRecipeDto) {
+  @RequirePermission(Permission.MENU_MANAGE)
+  upsertRecipe(
+    @CurrentUser() user: any,
+    @Param('id') id: string,
+    @Body() dto: UpsertMenuRecipeDto,
+  ) {
     return this.menuService.upsertRecipe(user.tenantId, user.userId, id, dto);
   }
 
   @Post(':id/check-availability')
   @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
-  checkAvailability(@CurrentUser() user: any, @Param('id') id: string, @Body('quantity') quantity?: number) {
+  checkAvailability(
+    @CurrentUser() user: any,
+    @Param('id') id: string,
+    @Body('quantity') quantity?: number,
+  ) {
     return this.menuService.checkAvailability(user.tenantId, id, quantity || 1);
   }
 }

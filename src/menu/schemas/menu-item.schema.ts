@@ -1,5 +1,9 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
+import {
+  integerVndValidator,
+  INTEGER_VND_MESSAGE,
+} from '../../common/domain/money';
 import { ItemCategory } from '../../inventory/schemas/inventory.schema';
 
 export type MenuItemDocument = MenuItem & Document;
@@ -29,7 +33,11 @@ export class MenuItem {
   @Prop()
   description?: string;
 
-  @Prop({ required: true, min: 0 })
+  @Prop({
+    required: true,
+    min: 0,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   sellingPrice: number;
 
   @Prop()

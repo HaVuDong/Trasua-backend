@@ -1,12 +1,22 @@
-import { Injectable, UnauthorizedException, ForbiddenException } from '@nestjs/common';
+import {
+  Injectable,
+  UnauthorizedException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
-import { User, UserDocument, UserStatus, Role } from '../users/schemas/user.schema';
+import {
+  User,
+  UserDocument,
+  UserStatus,
+  Role,
+} from '../users/schemas/user.schema';
 // @ts-ignore
 import * as bcrypt from 'bcrypt';
 import { AuditLogService } from '../common/services/audit-log.service';
 import { EmailService } from '../common/services/email.service';
+import { getEffectivePermissions } from '../common/permissions/permissions';
 
 @Injectable()
 export class AuthService {
@@ -24,6 +34,11 @@ export class AuthService {
       sub: userDoc._id.toString(),
       role: userDoc.role,
       tenantId: userDoc.tenantId ? userDoc.tenantId.toString() : null,
+      permissionVersion: userDoc.permissionVersion || 1,
+      effectivePermissions: getEffectivePermissions(
+        userDoc.role,
+        userDoc.permissionOverrides,
+      ),
     };
   }
 
@@ -48,7 +63,34 @@ export class AuthService {
   }
 
   private hasOtpVerifiedDevice(userDoc: UserDocument, deviceId: string) {
-    return userDoc.trustedDevices.some((d) => d.deviceId === deviceId && Boolean(d.verifiedAt));
+    return userDoc.trustedDevices.some(
+      (d) => d.deviceId === deviceId && Boolean(d.verifiedAt),
+    );
+  }
+
+  private createOtpCode() {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+  }
+
+  private clearDeviceOtp(userDoc: UserDocument) {
+    userDoc.localOtpCode = undefined;
+    userDoc.localOtpExpires = undefined;
+    userDoc.localOtpAttempts = 0;
+  }
+
+  private async storeDeviceOtp(userDoc: UserDocument, otp: string) {
+    userDoc.localOtpCode = await bcrypt.hash(otp, 10);
+    userDoc.localOtpExpires = new Date(Date.now() + 15 * 60 * 1000);
+    userDoc.localOtpAttempts = 0;
+    await userDoc.save();
+  }
+
+  private async compareDeviceOtp(otpCode: string, storedOtp: string) {
+    const normalizedOtp = String(otpCode || '').trim();
+    if (/^\d{6}$/.test(storedOtp)) {
+      return storedOtp === normalizedOtp;
+    }
+    return bcrypt.compare(normalizedOtp, storedOtp);
   }
 
   private async upsertTrustedDevice(
@@ -59,7 +101,9 @@ export class AuthService {
     trustMethod: string,
   ) {
     const verifiedAt = new Date();
-    const deviceExists = userDoc.trustedDevices.some((d) => d.deviceId === deviceId);
+    const deviceExists = userDoc.trustedDevices.some(
+      (d) => d.deviceId === deviceId,
+    );
     if (!deviceExists) {
       userDoc.trustedDevices.push({
         deviceId,
@@ -84,7 +128,11 @@ export class AuthService {
     await userDoc.save();
   }
 
-  async validateUser(email: string, pass: string, ipAddress?: string): Promise<any> {
+  async validateUser(
+    email: string,
+    pass: string,
+    ipAddress?: string,
+  ): Promise<any> {
     const user = await this.userModel.findOne({
       email,
     });
@@ -103,7 +151,9 @@ export class AuthService {
 
       // Check if account is temporarily locked
       if (user.lockUntil && user.lockUntil > new Date()) {
-        throw new UnauthorizedException(`Account is temporarily locked. Try again after ${user.lockUntil.toLocaleTimeString()}`);
+        throw new UnauthorizedException(
+          `Account is temporarily locked. Try again after ${user.lockUntil.toLocaleTimeString()}`,
+        );
       }
     }
 
@@ -134,7 +184,9 @@ export class AuthService {
               ipAddress,
             );
           }
-          throw new UnauthorizedException('Too many failed attempts. Account locked for 15 minutes.');
+          throw new UnauthorizedException(
+            'Too many failed attempts. Account locked for 15 minutes.',
+          );
         }
         await user.save();
       }
@@ -155,7 +207,9 @@ export class AuthService {
 
     // SYSTEM_OWNER: skip all device verification, auto-register device & login immediately
     if (isSystemOwner) {
-      const deviceExists = userDoc.trustedDevices.some(d => d.deviceId === deviceId);
+      const deviceExists = userDoc.trustedDevices.some(
+        (d) => d.deviceId === deviceId,
+      );
       if (!deviceExists) {
         const now = new Date();
         userDoc.trustedDevices.push({
@@ -167,7 +221,7 @@ export class AuthService {
           trustMethod: 'SYSTEM_OWNER',
         });
       } else {
-        const dev = userDoc.trustedDevices.find(d => d.deviceId === deviceId);
+        const dev = userDoc.trustedDevices.find((d) => d.deviceId === deviceId);
         if (dev) {
           dev.userAgent = userAgent;
           dev.ip = ip;
@@ -179,13 +233,7 @@ export class AuthService {
       }
       await userDoc.save();
 
-      const payload = {
-        email: userDoc.email,
-        phone: userDoc.phone,
-        sub: userDoc._id.toString(),
-        role: userDoc.role,
-        tenantId: userDoc.tenantId ? userDoc.tenantId.toString() : null,
-      };
+      const payload = this.buildAuthPayload(userDoc);
 
       // SYSTEM_OWNER must change password on every login
       if (userDoc.mustChangePassword) {
@@ -197,7 +245,8 @@ export class AuthService {
         return {
           requiresPasswordChange: true,
           tempToken,
-          message: 'Bạn cần đổi mật khẩu trước khi tiếp tục. Sử dụng tempToken để gọi /auth/change-password.',
+          message:
+            'Bạn cần đổi mật khẩu trước khi tiếp tục. Sử dụng tempToken để gọi /auth/change-password.',
         };
       }
 
@@ -215,16 +264,31 @@ export class AuthService {
 
     if (!deviceExists) {
       if (this.emailService.shouldSkipDeviceOtp()) {
-        await this.upsertTrustedDevice(userDoc, deviceId, userAgent, ip, 'BYPASS');
+        await this.upsertTrustedDevice(
+          userDoc,
+          deviceId,
+          userAgent,
+          ip,
+          'BYPASS',
+        );
         return this.buildLoginResponse(userDoc);
       }
 
       // First login or new device: generate OTP and send it to the account email.
-      const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
-      userDoc.localOtpCode = otp;
-      userDoc.localOtpExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
-      await userDoc.save();
-      const emailResult = await this.emailService.sendDeviceOtp(userDoc.email || '', otp, userDoc.name);
+      const otp = this.createOtpCode();
+      await this.storeDeviceOtp(userDoc, otp);
+      let emailResult: { delivered: boolean; devOtp?: string };
+      try {
+        emailResult = await this.emailService.sendDeviceOtp(
+          userDoc.email || '',
+          otp,
+          userDoc.name,
+        );
+      } catch (error) {
+        this.clearDeviceOtp(userDoc);
+        await userDoc.save();
+        throw error;
+      }
 
       // Log warning
       if (userDoc.tenantId) {
@@ -245,7 +309,7 @@ export class AuthService {
       };
     } else {
       // Update last login info
-      const dev = userDoc.trustedDevices.find(d => d.deviceId === deviceId);
+      const dev = userDoc.trustedDevices.find((d) => d.deviceId === deviceId);
       if (dev) {
         dev.userAgent = userAgent;
         dev.ip = ip;
@@ -268,16 +332,37 @@ export class AuthService {
     const userDoc = await this.userModel.findById(userId).exec();
     if (!userDoc) throw new UnauthorizedException('User not found');
 
-    if (!userDoc.localOtpCode || userDoc.localOtpCode !== otpCode) {
+    if (!userDoc.localOtpCode || !userDoc.localOtpExpires) {
       throw new UnauthorizedException('Invalid OTP code');
     }
 
-    if (!userDoc.localOtpExpires || userDoc.localOtpExpires < new Date()) {
+    if (userDoc.localOtpExpires < new Date()) {
+      this.clearDeviceOtp(userDoc);
+      await userDoc.save();
       throw new UnauthorizedException('OTP code has expired');
     }
 
+    const otpMatches = await this.compareDeviceOtp(
+      otpCode,
+      userDoc.localOtpCode,
+    );
+    if (!otpMatches) {
+      userDoc.localOtpAttempts = (userDoc.localOtpAttempts || 0) + 1;
+      if (userDoc.localOtpAttempts >= 5) {
+        this.clearDeviceOtp(userDoc);
+        await userDoc.save();
+        throw new UnauthorizedException(
+          'OTP code has expired. Please request a new OTP.',
+        );
+      }
+      await userDoc.save();
+      throw new UnauthorizedException('Invalid OTP code');
+    }
+
     const now = new Date();
-    const existingDevice = userDoc.trustedDevices.find((d) => d.deviceId === deviceId);
+    const existingDevice = userDoc.trustedDevices.find(
+      (d) => d.deviceId === deviceId,
+    );
     if (existingDevice) {
       existingDevice.userAgent = userAgent;
       existingDevice.ip = ip;
@@ -296,9 +381,7 @@ export class AuthService {
       });
     }
 
-    // Clear OTP
-    userDoc.localOtpCode = undefined;
-    userDoc.localOtpExpires = undefined;
+    this.clearDeviceOtp(userDoc);
     await userDoc.save();
 
     if (userDoc.tenantId) {
@@ -314,7 +397,10 @@ export class AuthService {
     return this.buildLoginResponse(userDoc);
   }
 
-  async generateOtpForUser(tenantId: string | undefined, targetUserId: string): Promise<{ delivered: boolean; devOtp?: string }> {
+  async generateOtpForUser(
+    tenantId: string | undefined,
+    targetUserId: string,
+  ): Promise<{ delivered: boolean; devOtp?: string }> {
     const query: Record<string, unknown> = { _id: targetUserId };
     if (tenantId) {
       query.tenantId = new Types.ObjectId(tenantId);
@@ -322,11 +408,38 @@ export class AuthService {
     const user = await this.userModel.findOne(query).exec();
     if (!user) throw new UnauthorizedException('User not found');
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    user.localOtpCode = otp;
-    user.localOtpExpires = new Date(Date.now() + 15 * 60 * 1000);
-    await user.save();
-    return this.emailService.sendDeviceOtp(user.email || '', otp, user.name);
+    const otp = this.createOtpCode();
+    await this.storeDeviceOtp(user, otp);
+    try {
+      return await this.emailService.sendDeviceOtp(
+        user.email || '',
+        otp,
+        user.name,
+      );
+    } catch (error) {
+      this.clearDeviceOtp(user);
+      await user.save();
+      throw error;
+    }
+  }
+
+  async getPermissionSnapshot(userId: string) {
+    const userDoc = await this.userModel
+      .findById(userId)
+      .select('role tenantId permissionOverrides permissionVersion')
+      .exec();
+    if (!userDoc) throw new UnauthorizedException('User not found');
+
+    return {
+      userId: userDoc._id.toString(),
+      role: userDoc.role,
+      tenantId: userDoc.tenantId ? userDoc.tenantId.toString() : null,
+      effectivePermissions: getEffectivePermissions(
+        userDoc.role,
+        userDoc.permissionOverrides,
+      ),
+      permissionVersion: userDoc.permissionVersion || 1,
+    };
   }
 
   async changePassword(
@@ -346,7 +459,9 @@ export class AuthService {
     // Prevent reusing the same password
     const sameAsOld = await bcrypt.compare(newPassword, userDoc.passwordHash);
     if (sameAsOld) {
-      throw new UnauthorizedException('Mật khẩu mới không được trùng với mật khẩu cũ');
+      throw new UnauthorizedException(
+        'Mật khẩu mới không được trùng với mật khẩu cũ',
+      );
     }
 
     // Hash and save new password
@@ -355,13 +470,7 @@ export class AuthService {
     await userDoc.save();
 
     // Return full access token
-    const payload = {
-      email: userDoc.email,
-      phone: userDoc.phone,
-      sub: userDoc._id.toString(),
-      role: userDoc.role,
-      tenantId: userDoc.tenantId ? userDoc.tenantId.toString() : null,
-    };
+    const payload = this.buildAuthPayload(userDoc);
 
     return {
       access_token: this.jwtService.sign(payload),

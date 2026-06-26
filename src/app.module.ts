@@ -20,9 +20,16 @@ import { MenuModule } from './menu/menu.module';
 import { PaymentsModule } from './payments/payments.module';
 import { PublicSignupModule } from './public-signup/public-signup.module';
 import { BillingModule } from './billing/billing.module';
+import { OperationsFoundationModule } from './operations-foundation/operations-foundation.module';
+import { CashierModule } from './cashier/cashier.module';
+import { InvoicesModule } from './invoices/invoices.module';
+import { WebhooksModule } from './webhooks/webhooks.module';
 
 function isRedisQueueDisabled() {
-  return process.env.DISABLE_REDIS_QUEUE === 'true' || process.env.REDIS_DISABLED === 'true';
+  return (
+    process.env.DISABLE_REDIS_QUEUE === 'true' ||
+    process.env.REDIS_DISABLED === 'true'
+  );
 }
 
 function toBoolean(value?: string | boolean) {
@@ -32,7 +39,7 @@ function toBoolean(value?: string | boolean) {
 
 function getRedisConnectionOptions(configService: ConfigService) {
   const redisUrl = configService.get<string>('REDIS_URL');
-  const connection: Record<string, any> = {
+  const connection: Record<string, unknown> = {
     maxRetriesPerRequest: null,
   };
 
@@ -43,8 +50,12 @@ function getRedisConnectionOptions(configService: ConfigService) {
       ...connection,
       host: parsed.hostname,
       port: Number(parsed.port || 6379),
-      username: parsed.username ? decodeURIComponent(parsed.username) : undefined,
-      password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+      username: parsed.username
+        ? decodeURIComponent(parsed.username)
+        : undefined,
+      password: parsed.password
+        ? decodeURIComponent(parsed.password)
+        : undefined,
       db: db ? Number(db) : undefined,
       tls: parsed.protocol === 'rediss:' ? {} : undefined,
     };
@@ -60,20 +71,47 @@ function getRedisConnectionOptions(configService: ConfigService) {
   };
 }
 
-function getThrottleTracker(req: Record<string, any>) {
-  const forwardedFor = req.headers?.['x-forwarded-for'];
-  const ipSource = (Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor) || req.socket?.remoteAddress || req.ip || 'unknown';
-  const ip = String(ipSource).replace('::ffff:', '');
-  const body = req.body || {};
-  const params = req.params || {};
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object'
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function asTrackerPart(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number') {
+    return String(value);
+  }
+  return '';
+}
+
+function firstTrackerPart(value: unknown): string {
+  if (Array.isArray(value)) {
+    return asTrackerPart(value[0]);
+  }
+  return asTrackerPart(value);
+}
+
+function getThrottleTracker(req: Record<string, unknown>) {
+  const headers = asRecord(req.headers);
+  const socket = asRecord(req.socket);
+  const body = asRecord(req.body);
+  const params = asRecord(req.params);
+  const admin = asRecord(body.admin);
+  const forwardedFor = firstTrackerPart(headers['x-forwarded-for']);
+  const ipSource =
+    forwardedFor ||
+    asTrackerPart(socket.remoteAddress) ||
+    asTrackerPart(req.ip) ||
+    'unknown';
+  const ip = ipSource.replace('::ffff:', '');
   const contextKey =
-    body.sessionId ||
-    body.signupId ||
-    body.admin?.email ||
-    body.tenantId ||
-    params.qrToken ||
-    params.paymentId ||
-    params.tenantId ||
+    asTrackerPart(body.sessionId) ||
+    asTrackerPart(body.signupId) ||
+    asTrackerPart(admin.email) ||
+    asTrackerPart(body.tenantId) ||
+    asTrackerPart(params.qrToken) ||
+    asTrackerPart(params.paymentId) ||
+    asTrackerPart(params.tenantId) ||
     '';
   return `${ip}:${contextKey}`;
 }
@@ -86,7 +124,7 @@ function getThrottleTracker(req: Record<string, any>) {
     }),
     MongooseModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: async (configService: ConfigService) => ({
+      useFactory: (configService: ConfigService) => ({
         uri: configService.get<string>('MONGODB_URI'),
       }),
       inject: [ConfigService],
@@ -98,19 +136,17 @@ function getThrottleTracker(req: Record<string, any>) {
         getTracker: getThrottleTracker,
       },
     ]),
-    ...(
-      isRedisQueueDisabled()
-        ? []
-        : [
-            BullModule.forRootAsync({
-              imports: [ConfigModule],
-              useFactory: async (configService: ConfigService) => ({
-                connection: getRedisConnectionOptions(configService),
-              }),
-              inject: [ConfigService],
+    ...(isRedisQueueDisabled()
+      ? []
+      : [
+          BullModule.forRootAsync({
+            imports: [ConfigModule],
+            useFactory: (configService: ConfigService) => ({
+              connection: getRedisConnectionOptions(configService),
             }),
-          ]
-    ),
+            inject: [ConfigService],
+          }),
+        ]),
     CommonModule,
     AuthModule,
     UsersModule,
@@ -125,6 +161,10 @@ function getThrottleTracker(req: Record<string, any>) {
     BillingModule,
     PaymentsModule,
     PublicSignupModule,
+    OperationsFoundationModule,
+    CashierModule,
+    InvoicesModule,
+    WebhooksModule,
   ],
   controllers: [AppController],
   providers: [

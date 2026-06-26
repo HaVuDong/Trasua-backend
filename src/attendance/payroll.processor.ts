@@ -1,5 +1,6 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
+import { Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Attendance, AttendanceDocument } from './schemas/attendance.schema';
@@ -26,6 +27,8 @@ function formatPayrollDate(dateLike: Date | string): string {
 
 @Processor('payroll-queue')
 export class PayrollProcessor extends WorkerHost {
+  private readonly logger = new Logger(PayrollProcessor.name);
+
   constructor(
     @InjectModel(Attendance.name) private attendanceModel: Model<AttendanceDocument>,
     @InjectModel(LeaveRequest.name) private leaveModel: Model<LeaveRequestDocument>,
@@ -39,7 +42,7 @@ export class PayrollProcessor extends WorkerHost {
 
   async process(job: Job<any, any, string>): Promise<any> {
     const { tenantId, month } = job.data;
-    console.log(`Processing payroll job ${job.id} for tenant: ${tenantId}, month: ${month}`);
+    this.logger.log(`Processing payroll job ${job.id} for tenant: ${tenantId}, month: ${month}`);
 
     // Parse month (format: "YYYY-MM")
     const [year, monthStr] = month.split('-').map(Number);
@@ -190,7 +193,7 @@ export class PayrollProcessor extends WorkerHost {
       ).exec();
     }
 
-    console.log(`Payroll calculation completed for tenant: ${tenantId}`);
+    this.logger.log(`Payroll calculation completed for tenant: ${tenantId}`);
     return { success: true };
   }
 }

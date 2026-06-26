@@ -7,15 +7,19 @@ import { AuditLog, AuditLogDocument } from '../schemas/audit-log.schema';
 export class AuditLogService {
   constructor(@InjectModel(AuditLog.name) private logModel: Model<AuditLogDocument>) {}
 
-  async log(tenantId: string, userId: string, action: string, details?: any, ipAddress?: string): Promise<AuditLog> {
+  async log(tenantId: string, userId: string | undefined, action: string, details?: any, ipAddress?: string): Promise<AuditLog> {
     const log = new this.logModel({
       tenantId: new Types.ObjectId(tenantId),
-      userId: new Types.ObjectId(userId),
+      userId: userId ? new Types.ObjectId(userId) : undefined,
       action,
       details,
       ipAddress,
     });
     return log.save();
+  }
+
+  async logSystem(tenantId: string, action: string, details?: any, ipAddress?: string): Promise<AuditLog> {
+    return this.log(tenantId, undefined, action, details, ipAddress);
   }
 
   async getLogs(tenantId: string): Promise<AuditLog[]> {

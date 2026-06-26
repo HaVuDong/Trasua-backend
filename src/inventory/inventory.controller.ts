@@ -1,4 +1,18 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Res, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Put,
+  Query,
+  Res,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
 import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { InventoryService } from './inventory.service';
@@ -9,6 +23,9 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '../users/schemas/user.schema';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { RequirePermission } from '../common/decorators/permissions.decorator';
+import { Permission } from '../common/permissions/permission.enum';
+import { InventoryAdjustmentStatus } from './schemas/inventory-adjustment.schema';
 // @ts-ignore
 import * as ExcelJS from 'exceljs';
 
@@ -60,7 +77,7 @@ export class InventoryController {
       { header: 'Tối thiểu', key: 'minStock', width: 15 },
     ];
 
-    items.forEach(item => {
+    items.forEach((item) => {
       worksheet.addRow({
         id: (item as any)._id.toString(),
         name: item.name,
@@ -73,8 +90,14 @@ export class InventoryController {
       });
     });
 
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename=' + 'inventory.xlsx');
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename=' + 'inventory.xlsx',
+    );
 
     await workbook.xlsx.write(res);
     res.end();
@@ -85,16 +108,28 @@ export class InventoryController {
   async downloadImportTemplate(@Res() res: Response) {
     const buffer = await this.inventoryService.buildItemsImportTemplate();
 
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename=inventory_import_template.xlsx');
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename=inventory_import_template.xlsx',
+    );
     res.send(buffer);
   }
 
   @Post('items/import-excel')
   @Roles(Role.ADMIN, Role.MANAGER)
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 2 * 1024 * 1024 } }))
+  @UseInterceptors(
+    FileInterceptor('file', { limits: { fileSize: 2 * 1024 * 1024 } }),
+  )
   importItemsFromExcel(@CurrentUser() user: any, @UploadedFile() file: any) {
-    return this.inventoryService.importItemsFromExcel(user.tenantId, file, user.userId);
+    return this.inventoryService.importItemsFromExcel(
+      user.tenantId,
+      file,
+      user.userId,
+    );
   }
 
   @Get('items/:id')
@@ -105,7 +140,11 @@ export class InventoryController {
 
   @Put('items/:id')
   @Roles(Role.ADMIN, Role.MANAGER)
-  updateItem(@CurrentUser() user: any, @Param('id') id: string, @Body() dto: Partial<CreateItemDto>) {
+  updateItem(
+    @CurrentUser() user: any,
+    @Param('id') id: string,
+    @Body() dto: Partial<CreateItemDto>,
+  ) {
     return this.inventoryService.updateItem(user.tenantId, id, dto);
   }
 
@@ -125,5 +164,42 @@ export class InventoryController {
   @Roles(Role.ADMIN, Role.MANAGER)
   getHistory(@CurrentUser() user: any) {
     return this.inventoryService.getImportHistory(user.tenantId);
+  }
+
+  @Post('adjustments')
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.INVENTORY_ADJUST)
+  createAdjustment(@CurrentUser() user: any, @Body() dto: any) {
+    return this.inventoryService.createAdjustment(
+      user.tenantId,
+      user.userId,
+      dto,
+    );
+  }
+
+  @Get('adjustments')
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.INVENTORY_ADJUST)
+  getAdjustments(
+    @CurrentUser() user: any,
+    @Query('status') status?: InventoryAdjustmentStatus,
+  ) {
+    return this.inventoryService.findAdjustments(user.tenantId, status);
+  }
+
+  @Patch('adjustments/:id/review')
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.INVENTORY_ADJUST)
+  reviewAdjustment(
+    @CurrentUser() user: any,
+    @Param('id') id: string,
+    @Body() dto: any,
+  ) {
+    return this.inventoryService.reviewAdjustment(
+      user.tenantId,
+      id,
+      user.userId,
+      dto,
+    );
   }
 }

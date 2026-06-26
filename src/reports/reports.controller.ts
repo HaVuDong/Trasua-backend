@@ -3,6 +3,8 @@ import { ReportsService } from './reports.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
+import { RequirePermission } from '../common/decorators/permissions.decorator';
+import { Permission } from '../common/permissions/permission.enum';
 import { Role } from '../users/schemas/user.schema';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 // @ts-ignore
@@ -16,6 +18,7 @@ export class ReportsController {
   // Dashboard — real-time overview
   @Get('dashboard')
   @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.REPORT_VIEW)
   getDashboard(@CurrentUser() user: any) {
     return this.reportsService.getDashboard(user.tenantId);
   }
@@ -23,6 +26,7 @@ export class ReportsController {
   // Revenue by hour
   @Get('revenue-by-hour')
   @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.REPORT_VIEW)
   getRevenueByHour(@CurrentUser() user: any, @Query('date') date?: string) {
     return this.reportsService.getRevenueByHour(user.tenantId, date);
   }
@@ -30,20 +34,29 @@ export class ReportsController {
   // Top selling / least selling items
   @Get('top-items')
   @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.REPORT_VIEW)
   getTopItems(
     @CurrentUser() user: any,
     @Query('startDate') startStr: string,
     @Query('endDate') endStr: string,
     @Query('limit') limit = '10',
   ) {
-    const startDate = startStr ? new Date(startStr) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const startDate = startStr
+      ? new Date(startStr)
+      : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const endDate = endStr ? new Date(endStr) : new Date();
-    return this.reportsService.getTopItems(user.tenantId, startDate, endDate, parseInt(limit));
+    return this.reportsService.getTopItems(
+      user.tenantId,
+      startDate,
+      endDate,
+      parseInt(limit),
+    );
   }
 
   // Financial report (profit analysis)
   @Get('financial')
   @Roles(Role.ADMIN)
+  @RequirePermission(Permission.REPORT_VIEW)
   getFinancial(
     @CurrentUser() user: any,
     @Query('startDate') startStr: string,
@@ -52,11 +65,57 @@ export class ReportsController {
     const startDate = startStr ? new Date(startStr) : new Date();
     if (!startStr) startDate.setDate(startDate.getDate() - 30);
     const endDate = endStr ? new Date(endStr) : new Date();
-    return this.reportsService.getFinancialReport(user.tenantId, startDate, endDate);
+    return this.reportsService.getFinancialReport(
+      user.tenantId,
+      startDate,
+      endDate,
+    );
+  }
+
+  @Get('profit')
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.REPORT_VIEW)
+  getProfit(
+    @CurrentUser() user: any,
+    @Query('startDate') startStr: string,
+    @Query('endDate') endStr: string,
+    @Query('groupBy') groupBy: 'day' | 'item' | 'category' = 'day',
+  ) {
+    const startDate = startStr ? new Date(startStr) : new Date();
+    if (!startStr) startDate.setDate(startDate.getDate() - 30);
+    const endDate = endStr ? new Date(endStr) : new Date();
+    const safeGroupBy = ['day', 'item', 'category'].includes(groupBy)
+      ? groupBy
+      : 'day';
+    return this.reportsService.getProfitReport(
+      user.tenantId,
+      startDate,
+      endDate,
+      safeGroupBy,
+    );
+  }
+
+  @Get('item-margin')
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.REPORT_VIEW)
+  getItemMargin(
+    @CurrentUser() user: any,
+    @Query('startDate') startStr: string,
+    @Query('endDate') endStr: string,
+  ) {
+    const startDate = startStr ? new Date(startStr) : new Date();
+    if (!startStr) startDate.setDate(startDate.getDate() - 30);
+    const endDate = endStr ? new Date(endStr) : new Date();
+    return this.reportsService.getItemMarginReport(
+      user.tenantId,
+      startDate,
+      endDate,
+    );
   }
 
   @Get('revenue')
   @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.REPORT_VIEW)
   async getRevenue(
     @CurrentUser() user: any,
     @Query('startDate') startStr: string,
@@ -68,7 +127,11 @@ export class ReportsController {
     if (!startStr) startDate.setDate(startDate.getDate() - 30);
     const endDate = endStr ? new Date(endStr) : new Date();
 
-    const data = await this.reportsService.getRevenueReport(user.tenantId, startDate, endDate);
+    const data = await this.reportsService.getRevenueReport(
+      user.tenantId,
+      startDate,
+      endDate,
+    );
 
     if (exportType === 'excel') {
       const workbook = new ExcelJS.Workbook();
@@ -96,8 +159,14 @@ export class ReportsController {
         });
       });
 
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', 'attachment; filename=' + 'revenue_report.xlsx');
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename=' + 'revenue_report.xlsx',
+      );
 
       await workbook.xlsx.write(res);
       return res.end();
@@ -108,6 +177,7 @@ export class ReportsController {
 
   @Get('employee')
   @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.REPORT_VIEW)
   async getEmployee(
     @CurrentUser() user: any,
     @Query('startDate') startStr: string,
@@ -119,7 +189,11 @@ export class ReportsController {
     if (!startStr) startDate.setDate(startDate.getDate() - 30);
     const endDate = endStr ? new Date(endStr) : new Date();
 
-    const data = await this.reportsService.getEmployeeReport(user.tenantId, startDate, endDate);
+    const data = await this.reportsService.getEmployeeReport(
+      user.tenantId,
+      startDate,
+      endDate,
+    );
 
     if (exportType === 'excel') {
       const workbook = new ExcelJS.Workbook();
@@ -136,12 +210,18 @@ export class ReportsController {
         { header: 'Số lần trễ', key: 'lateDays', width: 12 },
       ];
 
-      data.forEach(item => {
+      data.forEach((item) => {
         worksheet.addRow(item);
       });
 
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', 'attachment; filename=' + 'employee_report.xlsx');
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename=' + 'employee_report.xlsx',
+      );
 
       await workbook.xlsx.write(res);
       return res.end();

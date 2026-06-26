@@ -1,4 +1,13 @@
-import { Controller, Get, Post, Body, Param, Patch, UseGuards, Query } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Patch,
+  UseGuards,
+  Query,
+} from '@nestjs/common';
 import { ChatService } from './chat.service';
 import { CreateGroupDto, SendMessageDto } from './dto/create-chat.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
@@ -12,8 +21,15 @@ export class ChatController {
 
   // DM
   @Post('dm/:recipientId')
-  getOrCreateDM(@CurrentUser() user: any, @Param('recipientId') recipientId: string) {
-    return this.chatService.getOrCreateDM(user.tenantId, user.userId, recipientId);
+  getOrCreateDM(
+    @CurrentUser() user: any,
+    @Param('recipientId') recipientId: string,
+  ) {
+    return this.chatService.getOrCreateDM(
+      user.tenantId,
+      user.userId,
+      recipientId,
+    );
   }
 
   // Group management
@@ -23,18 +39,45 @@ export class ChatController {
   }
 
   @Post('group/:roomId/members')
-  addMember(@CurrentUser() user: any, @Param('roomId') roomId: string, @Body('userId') userId: string) {
-    return this.chatService.addMember(user.tenantId, roomId, userId, user.userId);
+  addMember(
+    @CurrentUser() user: any,
+    @Param('roomId') roomId: string,
+    @Body('userId') userId: string,
+  ) {
+    return this.chatService.addMember(
+      user.tenantId,
+      roomId,
+      userId,
+      user.userId,
+    );
   }
 
   @Patch('group/:roomId/members/:userId/remove')
-  removeMember(@CurrentUser() user: any, @Param('roomId') roomId: string, @Param('userId') userId: string) {
-    return this.chatService.removeMember(user.tenantId, roomId, userId, user.userId);
+  removeMember(
+    @CurrentUser() user: any,
+    @Param('roomId') roomId: string,
+    @Param('userId') userId: string,
+  ) {
+    return this.chatService.removeMember(
+      user.tenantId,
+      roomId,
+      userId,
+      user.userId,
+    );
   }
 
   @Patch('group/:roomId/rename')
-  renameGroup(@CurrentUser() user: any, @Param('roomId') roomId: string, @Body('name') name: string) {
-    return this.chatService.renameGroup(user.tenantId, roomId, name, user.userId);
+  renameGroup(
+    @CurrentUser() user: any,
+    @Param('roomId') roomId: string,
+    @Body('name') name: string,
+  ) {
+    return this.chatService.renameGroup(
+      user.tenantId,
+      roomId,
+      name,
+      user.userId,
+    );
   }
 
   // Messages
@@ -44,7 +87,12 @@ export class ChatController {
     @Param('roomId') roomId: string,
     @Body() dto: SendMessageDto,
   ) {
-    return this.chatService.sendMessage(user.tenantId, user.userId, roomId, dto);
+    return this.chatService.sendMessage(
+      user.tenantId,
+      user.userId,
+      roomId,
+      dto,
+    );
   }
 
   @Get('rooms')
@@ -80,12 +128,24 @@ export class ChatController {
     @Query('keyword') keyword: string,
     @Query('roomId') roomId?: string,
   ) {
-    return this.chatService.searchMessages(user.tenantId, user.userId, keyword, roomId);
+    return this.chatService.searchMessages(
+      user.tenantId,
+      user.userId,
+      keyword,
+      roomId,
+    );
   }
 
   // Pin/unpin important messages
   @Patch('message/:messageId/important')
-  toggleImportant(@CurrentUser() user: any, @Param('messageId') messageId: string) {
-    return this.chatService.toggleImportant(user.tenantId, messageId);
+  toggleImportant(
+    @CurrentUser() user: any,
+    @Param('messageId') messageId: string,
+  ) {
+    return this.chatService.toggleImportant(
+      user.tenantId,
+      user.userId,
+      messageId,
+    );
   }
 }

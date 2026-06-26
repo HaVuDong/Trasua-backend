@@ -1,5 +1,9 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import {
+  integerVndValidator,
+  INTEGER_VND_MESSAGE,
+} from '../../common/domain/money';
 
 export type TenantDocument = Tenant & Document;
 
@@ -22,7 +26,11 @@ export class SubscriptionInfo {
   @Prop({ required: true })
   plan: string;
 
-  @Prop({ type: String, enum: SubscriptionStatus, default: SubscriptionStatus.ACTIVE })
+  @Prop({
+    type: String,
+    enum: SubscriptionStatus,
+    default: SubscriptionStatus.ACTIVE,
+  })
   status: SubscriptionStatus;
 
   @Prop({ required: true })
@@ -34,7 +42,10 @@ export class SubscriptionInfo {
   @Prop()
   trialEndsAt?: Date;
 
-  @Prop({ default: 0 })
+  @Prop({
+    default: 0,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   amount?: number;
 
   @Prop({ default: 'VND' })
@@ -52,7 +63,10 @@ export class PaymentRecord {
   @Prop({ required: true })
   date: Date;
 
-  @Prop({ required: true })
+  @Prop({
+    required: true,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   amount: number;
 
   @Prop({ required: true })

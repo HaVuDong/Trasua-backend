@@ -1,4 +1,14 @@
-import { Controller, Get, Post, Body, Param, Patch, UseGuards, Query } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Patch,
+  UseGuards,
+  Query,
+  ForbiddenException,
+} from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
@@ -6,6 +16,9 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { IpWhitelistGuard } from '../common/guards/ip-whitelist.guard';
 import { Roles } from '../common/decorators/roles.decorator';
+import { RequirePermission } from '../common/decorators/permissions.decorator';
+import { Permission } from '../common/permissions/permission.enum';
+import { hasEffectivePermission } from '../common/permissions/permissions';
 import { Role } from '../users/schemas/user.schema';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { OrderItemStatus } from './schemas/order.schema';
@@ -34,19 +47,28 @@ export class OrdersController {
 
   // 1b. Public table info endpoint
   @Get(':tenantId/table-info/:qrToken')
-  getTableInfo(@Param('tenantId') tenantId: string, @Param('qrToken') qrToken: string) {
+  getTableInfo(
+    @Param('tenantId') tenantId: string,
+    @Param('qrToken') qrToken: string,
+  ) {
     return this.ordersService.getTableInfo(tenantId, qrToken);
   }
 
   // 1c. Public order status endpoint
   @Get(':tenantId/status/:orderId')
-  getOrderStatus(@Param('tenantId') tenantId: string, @Param('orderId') orderId: string) {
+  getOrderStatus(
+    @Param('tenantId') tenantId: string,
+    @Param('orderId') orderId: string,
+  ) {
     return this.ordersService.getPublicOrderStatus(tenantId, orderId);
   }
 
   // 1d. Public customer table session summary
   @Get(':tenantId/table-session/:sessionId/summary')
-  getTableSessionSummary(@Param('tenantId') tenantId: string, @Param('sessionId') sessionId: string) {
+  getTableSessionSummary(
+    @Param('tenantId') tenantId: string,
+    @Param('sessionId') sessionId: string,
+  ) {
     return this.ordersService.getTableSessionSummary(tenantId, sessionId);
   }
 
@@ -99,7 +121,11 @@ export class OrdersController {
     @Param('id') id: string,
     @Body('status') status: string,
   ) {
-    return this.ordersService.updateCustomerRequestStatus(user.tenantId, id, status);
+    return this.ordersService.updateCustomerRequestStatus(
+      user.tenantId,
+      id,
+      status,
+    );
   }
 
   @Post('table-sessions/:sessionId/manual-checkout')
@@ -111,7 +137,13 @@ export class OrdersController {
     @Body('discount') discount = 0,
     @Body('discountType') discountType = 'FLAT',
   ) {
-    return this.ordersService.manualCheckoutTableSession(user.tenantId, sessionId, user.userId, discount, discountType);
+    return this.ordersService.manualCheckoutTableSession(
+      user.tenantId,
+      sessionId,
+      user.userId,
+      discount,
+      discountType,
+    );
   }
 
   // 4. Search/filter orders
@@ -128,7 +160,12 @@ export class OrdersController {
     @Query('createdBy') createdBy?: string,
   ) {
     return this.ordersService.findOrders(user.tenantId, {
-      startDate, endDate, tableId, status, customerPhone, createdBy,
+      startDate,
+      endDate,
+      tableId,
+      status,
+      customerPhone,
+      createdBy,
     });
   }
 
@@ -136,13 +173,19 @@ export class OrdersController {
   @Get('table/:tableId')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
-  getOrdersByTable(@CurrentUser() user: any, @Param('tableId') tableId: string) {
+  getOrdersByTable(
+    @CurrentUser() user: any,
+    @Param('tableId') tableId: string,
+  ) {
     return this.ordersService.getOrdersByTable(user.tenantId, tableId);
   }
 
   // 5b. Public customer temporary bill (no auth, uses tenantId)
   @Get(':tenantId/table-bill/:tableId')
-  getTableBill(@Param('tenantId') tenantId: string, @Param('tableId') tableId: string) {
+  getTableBill(
+    @Param('tenantId') tenantId: string,
+    @Param('tableId') tableId: string,
+  ) {
     return this.ordersService.getTableBill(tenantId, tableId);
   }
 
@@ -166,7 +209,11 @@ export class OrdersController {
   @Patch(':id/reject')
   @UseGuards(JwtAuthGuard, RolesGuard, IpWhitelistGuard)
   @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
-  rejectOrder(@CurrentUser() user: any, @Param('id') id: string, @Body('reason') reason?: string) {
+  rejectOrder(
+    @CurrentUser() user: any,
+    @Param('id') id: string,
+    @Body('reason') reason?: string,
+  ) {
     return this.ordersService.rejectOrder(user.tenantId, id, reason);
   }
 
@@ -180,7 +227,15 @@ export class OrdersController {
     @Param('itemId') itemId: string,
     @Body('reason') reason?: string,
   ) {
-    return this.ordersService.cancelItem(user.tenantId, id, itemId, user.userId, user.role, reason);
+    return this.ordersService.cancelItem(
+      user.tenantId,
+      id,
+      itemId,
+      user.userId,
+      user.role,
+      reason,
+      hasEffectivePermission(user, Permission.ORDER_CANCEL_LATE),
+    );
   }
 
   // 10. Kitchen item status update
@@ -193,19 +248,26 @@ export class OrdersController {
     @Param('itemId') itemId: string,
     @Body('status') status: OrderItemStatus,
   ) {
-    return this.ordersService.updateItemStatus(user.tenantId, id, itemId, status, user.role);
+    return this.ordersService.updateItemStatus(
+      user.tenantId,
+      id,
+      itemId,
+      status,
+      user.role,
+    );
   }
 
   // 11. Mark free (item or entire order)
   @Patch(':id/free')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
+  @RequirePermission(Permission.ORDER_MARK_FREE)
   markFree(
     @CurrentUser() user: any,
     @Param('id') id: string,
     @Body('itemId') itemId?: string,
   ) {
-    return this.ordersService.markFree(user.tenantId, id, itemId);
+    return this.ordersService.markFree(user.tenantId, id, itemId, user.userId);
   }
 
   // 12. Get temporary bill details
@@ -218,7 +280,19 @@ export class OrdersController {
     @Query('discount') discount = '0',
     @Query('discountType') discountType = 'FLAT',
   ) {
-    return this.ordersService.getBill(user.tenantId, id, parseFloat(discount), discountType);
+    const discountAmount = parseFloat(discount);
+    if (
+      discountAmount > 0 &&
+      !hasEffectivePermission(user, Permission.ORDER_DISCOUNT)
+    ) {
+      throw new ForbiddenException('Ban khong co quyen giam gia');
+    }
+    return this.ordersService.getBill(
+      user.tenantId,
+      id,
+      discountAmount,
+      discountType,
+    );
   }
 
   // 13. Checkout / pay bill (requires IP whitelist)
@@ -231,6 +305,18 @@ export class OrdersController {
     @Body('discount') discount = 0,
     @Body('discountType') discountType = 'FLAT',
   ) {
-    return this.ordersService.checkout(user.tenantId, id, discount, discountType);
+    if (
+      Number(discount) > 0 &&
+      !hasEffectivePermission(user, Permission.ORDER_DISCOUNT)
+    ) {
+      throw new ForbiddenException('Ban khong co quyen giam gia');
+    }
+    return this.ordersService.checkout(
+      user.tenantId,
+      id,
+      discount,
+      discountType,
+      user.userId,
+    );
   }
 }

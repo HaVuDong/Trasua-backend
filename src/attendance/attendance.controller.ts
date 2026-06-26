@@ -1,4 +1,15 @@
-import { Controller, Get, Post, Body, Param, Patch, UseGuards, Req, Query, Res } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Patch,
+  UseGuards,
+  Req,
+  Query,
+  Res,
+} from '@nestjs/common';
 import { AttendanceService } from './attendance.service';
 import { CreateLeaveDto } from './dto/create-leave.dto';
 import { ReviewLeaveDto } from './dto/review-leave.dto';
@@ -6,6 +17,8 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { IpWhitelistGuard } from '../common/guards/ip-whitelist.guard';
 import { Roles } from '../common/decorators/roles.decorator';
+import { RequirePermission } from '../common/decorators/permissions.decorator';
+import { Permission } from '../common/permissions/permission.enum';
 import { Role } from '../users/schemas/user.schema';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 // @ts-ignore
@@ -25,23 +38,42 @@ export class AttendanceController {
     @Body('gps') gps?: string,
     @Body('shiftRegistrationId') shiftRegistrationId?: string,
   ) {
-    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip;
+    const clientIp =
+      req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip;
     const ipString = (Array.isArray(clientIp) ? clientIp[0] : clientIp) || '';
     const normalizedIp = ipString.replace('::ffff:', '');
-    return this.attendanceService.checkIn(user.tenantId, user.userId, normalizedIp, gps, shiftRegistrationId);
+    return this.attendanceService.checkIn(
+      user.tenantId,
+      user.userId,
+      normalizedIp,
+      gps,
+      shiftRegistrationId,
+    );
   }
 
   // Check-out requires IP whitelist
   @Post('check-out')
   @UseGuards(IpWhitelistGuard)
-  checkOut(@CurrentUser() user: any, @Body('shiftRegistrationId') shiftRegistrationId?: string) {
-    return this.attendanceService.checkOut(user.tenantId, user.userId, shiftRegistrationId);
+  checkOut(
+    @CurrentUser() user: any,
+    @Body('shiftRegistrationId') shiftRegistrationId?: string,
+  ) {
+    return this.attendanceService.checkOut(
+      user.tenantId,
+      user.userId,
+      shiftRegistrationId,
+    );
   }
 
   @Post('shifts')
   @Roles(Role.ADMIN, Role.MANAGER)
   createShift(@CurrentUser() user: any, @Body() dto: any) {
-    return this.attendanceService.createWorkShift(user.tenantId, user.userId, user.role, dto);
+    return this.attendanceService.createWorkShift(
+      user.tenantId,
+      user.userId,
+      user.role,
+      dto,
+    );
   }
 
   @Get('shifts')
@@ -52,13 +84,27 @@ export class AttendanceController {
     @Query('to') to?: string,
     @Query('status') status?: string,
   ) {
-    return this.attendanceService.getWorkShifts(user.tenantId, from, to, status);
+    return this.attendanceService.getWorkShifts(
+      user.tenantId,
+      from,
+      to,
+      status,
+    );
   }
 
   @Patch('shifts/:id/review')
   @Roles(Role.ADMIN)
-  reviewShift(@CurrentUser() user: any, @Param('id') id: string, @Body() dto: any) {
-    return this.attendanceService.reviewWorkShift(user.tenantId, id, user.userId, dto);
+  reviewShift(
+    @CurrentUser() user: any,
+    @Param('id') id: string,
+    @Body() dto: any,
+  ) {
+    return this.attendanceService.reviewWorkShift(
+      user.tenantId,
+      id,
+      user.userId,
+      dto,
+    );
   }
 
   @Get('my-shifts')
@@ -68,25 +114,54 @@ export class AttendanceController {
     @Query('from') from?: string,
     @Query('to') to?: string,
   ) {
-    return this.attendanceService.getMyShifts(user.tenantId, user.userId, user.role, from, to);
+    return this.attendanceService.getMyShifts(
+      user.tenantId,
+      user.userId,
+      user.role,
+      from,
+      to,
+    );
   }
 
   @Post('shifts/:id/register')
   @Roles(Role.MANAGER, Role.USER, Role.KITCHEN)
   registerShift(@CurrentUser() user: any, @Param('id') id: string) {
-    return this.attendanceService.registerShift(user.tenantId, user.userId, user.role, id);
+    return this.attendanceService.registerShift(
+      user.tenantId,
+      user.userId,
+      user.role,
+      id,
+    );
   }
 
   @Post('shift-registrations/:id/cancel')
   @Roles(Role.MANAGER, Role.USER, Role.KITCHEN)
-  cancelShiftRegistration(@CurrentUser() user: any, @Param('id') id: string, @Body('reason') reason?: string) {
-    return this.attendanceService.cancelShiftRegistration(user.tenantId, user.userId, id, reason);
+  cancelShiftRegistration(
+    @CurrentUser() user: any,
+    @Param('id') id: string,
+    @Body('reason') reason?: string,
+  ) {
+    return this.attendanceService.cancelShiftRegistration(
+      user.tenantId,
+      user.userId,
+      id,
+      reason,
+    );
   }
 
   @Patch('shift-registrations/:id/review-cancel')
   @Roles(Role.ADMIN, Role.MANAGER)
-  reviewShiftCancellation(@CurrentUser() user: any, @Param('id') id: string, @Body() dto: any) {
-    return this.attendanceService.reviewShiftCancellation(user.tenantId, id, user.userId, dto);
+  reviewShiftCancellation(
+    @CurrentUser() user: any,
+    @Param('id') id: string,
+    @Body() dto: any,
+  ) {
+    return this.attendanceService.reviewShiftCancellation(
+      user.tenantId,
+      id,
+      user.userId,
+      dto,
+    );
   }
 
   // Edit attendance (Admin only)
@@ -98,10 +173,17 @@ export class AttendanceController {
     @Body() updates: { checkInTime?: string; checkOutTime?: string },
     @Req() req: any,
   ) {
-    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip;
+    const clientIp =
+      req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip;
     const ipString = (Array.isArray(clientIp) ? clientIp[0] : clientIp) || '';
     const normalizedIp = ipString.replace('::ffff:', '');
-    return this.attendanceService.editAttendance(user.tenantId, id, user.userId, updates, normalizedIp);
+    return this.attendanceService.editAttendance(
+      user.tenantId,
+      id,
+      user.userId,
+      updates,
+      normalizedIp,
+    );
   }
 
   // Get daily attendance for all employees (Admin/Manager)
@@ -119,19 +201,34 @@ export class AttendanceController {
     @Param('userId') userId: string,
     @Query('month') month: string,
   ) {
-    return this.attendanceService.getMonthlyAttendance(user.tenantId, userId, month);
+    return this.attendanceService.getMonthlyAttendance(
+      user.tenantId,
+      userId,
+      month,
+    );
   }
 
   // Get own monthly attendance
   @Get('my-monthly')
-  getMyMonthlyAttendance(@CurrentUser() user: any, @Query('month') month: string) {
-    return this.attendanceService.getMonthlyAttendance(user.tenantId, user.userId, month);
+  getMyMonthlyAttendance(
+    @CurrentUser() user: any,
+    @Query('month') month: string,
+  ) {
+    return this.attendanceService.getMonthlyAttendance(
+      user.tenantId,
+      user.userId,
+      month,
+    );
   }
 
   // Leave request management
   @Post('leave')
   createLeaveRequest(@CurrentUser() user: any, @Body() dto: CreateLeaveDto) {
-    return this.attendanceService.createLeaveRequest(user.tenantId, user.userId, dto);
+    return this.attendanceService.createLeaveRequest(
+      user.tenantId,
+      user.userId,
+      dto,
+    );
   }
 
   @Get('leaves/pending')
@@ -153,7 +250,12 @@ export class AttendanceController {
     @Param('id') id: string,
     @Body() dto: ReviewLeaveDto,
   ) {
-    return this.attendanceService.reviewLeaveRequest(user.tenantId, id, user.userId, dto);
+    return this.attendanceService.reviewLeaveRequest(
+      user.tenantId,
+      id,
+      user.userId,
+      dto,
+    );
   }
 
   @Get('history')
@@ -181,30 +283,51 @@ export class AttendanceController {
     @Param('userId') userId: string,
     @Query('month') month: string,
   ) {
-    return this.attendanceService.getPayrollDetail(user.tenantId, userId, month);
+    return this.attendanceService.getPayrollDetail(
+      user.tenantId,
+      userId,
+      month,
+    );
   }
 
   @Patch('payroll/:id/adjust')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.PAYROLL_CONFIRM)
   adjustPayroll(
     @CurrentUser() user: any,
     @Param('id') payrollId: string,
     @Body() adjustments: any,
   ) {
-    return this.attendanceService.adjustPayroll(user.tenantId, payrollId, adjustments);
+    return this.attendanceService.adjustPayroll(
+      user.tenantId,
+      payrollId,
+      adjustments,
+    );
   }
 
   @Post('payroll/confirm')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @RequirePermission(Permission.PAYROLL_CONFIRM)
   confirmPayroll(@CurrentUser() user: any, @Query('month') month: string) {
-    return this.attendanceService.confirmPayroll(user.tenantId, month, user.userId);
+    return this.attendanceService.confirmPayroll(
+      user.tenantId,
+      month,
+      user.userId,
+    );
   }
 
   // Export payroll as Excel
   @Get('payroll/export')
   @Roles(Role.ADMIN, Role.MANAGER)
-  async exportPayroll(@CurrentUser() user: any, @Query('month') month: string, @Res() res: any) {
-    const payrolls = await this.attendanceService.getPayrolls(user.tenantId, month);
+  async exportPayroll(
+    @CurrentUser() user: any,
+    @Query('month') month: string,
+    @Res() res: any,
+  ) {
+    const payrolls = await this.attendanceService.getPayrolls(
+      user.tenantId,
+      month,
+    );
 
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet(`Lương tháng ${month}`);
@@ -223,8 +346,8 @@ export class AttendanceController {
       { header: 'Trạng thái', key: 'status', width: 15 },
     ];
 
-    payrolls.forEach(p => {
-      const userData = (p.userId as any);
+    payrolls.forEach((p) => {
+      const userData = p.userId as any;
       worksheet.addRow({
         name: userData?.name || '',
         email: userData?.email || '',
@@ -240,8 +363,14 @@ export class AttendanceController {
       });
     });
 
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=payroll_${month}.xlsx`);
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename=payroll_${month}.xlsx`,
+    );
 
     await workbook.xlsx.write(res);
     res.end();

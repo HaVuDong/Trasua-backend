@@ -1,5 +1,9 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
+import {
+  integerVndValidator,
+  INTEGER_VND_MESSAGE,
+} from '../../common/domain/money';
 
 export type OrderDocument = Order & Document;
 
@@ -18,6 +22,51 @@ export enum OrderStatus {
   CANCELLED = 'CANCELLED',
 }
 
+@Schema({ _id: false })
+export class OrderItemCostIngredientSnapshot {
+  @Prop({ type: Types.ObjectId, ref: 'InventoryItem', required: true })
+  inventoryItemId: Types.ObjectId;
+
+  @Prop({ required: true })
+  nameSnapshot: string;
+
+  @Prop({ required: true })
+  requiredQuantity: number;
+
+  @Prop({ required: true })
+  unit: string;
+
+  @Prop({
+    required: true,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
+  costPriceSnapshot: number;
+
+  @Prop({
+    required: true,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
+  costAmount: number;
+}
+
+@Schema({ _id: false })
+export class OrderItemCostSnapshot {
+  @Prop({
+    required: true,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
+  totalCost: number;
+
+  @Prop({ type: [OrderItemCostIngredientSnapshot], default: [] })
+  ingredients: OrderItemCostIngredientSnapshot[];
+
+  @Prop({ default: false })
+  costEstimated?: boolean;
+
+  @Prop({ default: false })
+  missingCost?: boolean;
+}
+
 @Schema({ _id: true })
 export class OrderItem {
   @Prop({ type: Types.ObjectId, ref: 'MenuItem', required: true })
@@ -32,7 +81,10 @@ export class OrderItem {
   @Prop({ required: true })
   quantity: number;
 
-  @Prop({ required: true })
+  @Prop({
+    required: true,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   price: number;
 
   @Prop()
@@ -57,7 +109,11 @@ export class OrderItem {
     type: [
       {
         _id: false,
-        inventoryItemId: { type: Types.ObjectId, ref: 'InventoryItem', required: true },
+        inventoryItemId: {
+          type: Types.ObjectId,
+          ref: 'InventoryItem',
+          required: true,
+        },
         ingredientNameSnapshot: { type: String, required: true },
         requiredQuantityPerUnit: { type: Number, required: true },
         totalRequiredQuantity: { type: Number, required: true },
@@ -77,6 +133,9 @@ export class OrderItem {
     wastePercent?: number;
     isOptional?: boolean;
   }>;
+
+  @Prop({ type: OrderItemCostSnapshot })
+  costSnapshot?: OrderItemCostSnapshot;
 }
 
 @Schema({ _id: false })
@@ -108,22 +167,39 @@ export class Order {
   @Prop({ enum: OrderStatus, default: OrderStatus.PENDING })
   status: OrderStatus;
 
-  @Prop({ required: true, default: 0 })
+  @Prop({
+    required: true,
+    default: 0,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   totalAmount: number;
 
-  @Prop({ default: 0 })
+  @Prop({
+    default: 0,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   discount: number;
 
   @Prop()
   discountType?: string; // 'FLAT' | 'PERCENT'
 
-  @Prop({ default: 0 })
+  @Prop({
+    default: 0,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   vat: number;
 
-  @Prop({ default: 0 })
+  @Prop({
+    default: 0,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   serviceCharge: number;
 
-  @Prop({ required: true, default: 0 })
+  @Prop({
+    required: true,
+    default: 0,
+    validate: { validator: integerVndValidator, message: INTEGER_VND_MESSAGE },
+  })
   finalAmount: number;
 
   @Prop({ default: false })
