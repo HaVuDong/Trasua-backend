@@ -95,6 +95,39 @@ export class AuthController {
     };
   }
 
+  @Post('forgot-password/request')
+  async requestForgotPasswordOtp(@Body('email') email: string) {
+    if (!email) {
+      throw new UnauthorizedException('Email is required');
+    }
+    return this.authService.requestForgotPasswordOtp(email.trim().toLowerCase());
+  }
+
+  @Post('forgot-password/verify')
+  async verifyForgotPasswordOtp(
+    @Body('email') email: string,
+    @Body('otpCode') otpCode: string,
+  ) {
+    if (!email || !otpCode) {
+      throw new UnauthorizedException('Email and OTP code are required');
+    }
+    return this.authService.verifyForgotPasswordOtp(email.trim().toLowerCase(), otpCode);
+  }
+
+  @Post('forgot-password/reset')
+  async resetPasswordWithToken(
+    @Body('token') token: string,
+    @Body('newPassword') newPassword: string,
+  ) {
+    if (!token || !newPassword) {
+      throw new UnauthorizedException('Token and new password are required');
+    }
+    if (newPassword.length < 8) {
+      throw new UnauthorizedException('Mật khẩu mới phải có ít nhất 8 ký tự');
+    }
+    return this.authService.resetPasswordWithToken(token, newPassword);
+  }
+
   @Post('change-password')
   @UseGuards(JwtAuthGuard)
   async changePassword(

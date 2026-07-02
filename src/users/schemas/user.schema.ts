@@ -113,6 +113,18 @@ export class User {
   @Prop({ default: 0 })
   localOtpAttempts?: number;
 
+  @Prop()
+  forgotPasswordOtpCode?: string;
+
+  @Prop()
+  forgotPasswordOtpExpires?: Date;
+
+  @Prop({ default: 0 })
+  forgotPasswordOtpAttempts?: number;
+
+  @Prop()
+  forgotPasswordBlockUntil?: Date;
+
   @Prop({ default: 0 })
   loginAttempts: number;
 
@@ -124,6 +136,9 @@ export class User {
 
   @Prop({ default: 1 })
   permissionVersion: number;
+
+  @Prop({ default: 1 })
+  authVersion: number;
 
   @Prop({ type: PermissionOverrides, default: () => ({ allow: [], deny: [] }) })
   permissionOverrides?: PermissionOverrides;

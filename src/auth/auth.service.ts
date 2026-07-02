@@ -6,6 +6,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import { randomInt } from 'crypto';
 import {
   User,
   UserDocument,
@@ -35,6 +36,7 @@ export class AuthService {
       role: userDoc.role,
       tenantId: userDoc.tenantId ? userDoc.tenantId.toString() : null,
       permissionVersion: userDoc.permissionVersion || 1,
+      authVersion: userDoc.authVersion || 1,
       effectivePermissions: getEffectivePermissions(
         userDoc.role,
         userDoc.permissionOverrides,
@@ -69,7 +71,7 @@ export class AuthService {
   }
 
   private createOtpCode() {
-    return Math.floor(100000 + Math.random() * 900000).toString();
+    return randomInt(100000, 1000000).toString();
   }
 
   private clearDeviceOtp(userDoc: UserDocument) {
@@ -467,11 +469,137 @@ export class AuthService {
     // Hash and save new password
     userDoc.passwordHash = await bcrypt.hash(newPassword, 10);
     userDoc.mustChangePassword = false;
+    userDoc.authVersion = (userDoc.authVersion || 1) + 1;
     await userDoc.save();
 
     // Return full access token
     const payload = this.buildAuthPayload(userDoc);
 
+    return {
+      access_token: this.jwtService.sign(payload),
+      message: 'Đổi mật khẩu thành công.',
+    };
+  }
+
+  async requestForgotPasswordOtp(email: string) {
+    const user = await this.userModel.findOne({ email });
+    if (!user) {
+      // Return success even if user not found to prevent email enumeration
+      return { message: 'Nếu email hợp lệ, OTP đã được gửi đến email của bạn.' };
+    }
+
+    if (user.forgotPasswordBlockUntil && user.forgotPasswordBlockUntil > new Date()) {
+      throw new ForbiddenException(`Vui lòng thử lại sau ${user.forgotPasswordBlockUntil.toLocaleTimeString()}`);
+    }
+
+    const otp = this.createOtpCode();
+    user.forgotPasswordOtpCode = await bcrypt.hash(otp, 10);
+    user.forgotPasswordOtpExpires = new Date(Date.now() + 15 * 60 * 1000);
+    user.forgotPasswordOtpAttempts = 0;
+    await user.save();
+
+    try {
+      await this.emailService.sendForgotPasswordOtp(email, otp, user.name);
+    } catch (error) {
+      user.forgotPasswordOtpCode = undefined;
+      user.forgotPasswordOtpExpires = undefined;
+      await user.save();
+      throw error;
+    }
+
+    return { message: 'Nếu email hợp lệ, OTP đã được gửi đến email của bạn.' };
+  }
+
+  async verifyForgotPasswordOtp(email: string, otpCode: string) {
+    const user = await this.userModel.findOne({ email });
+    if (!user) {
+      throw new UnauthorizedException('Mã OTP không hợp lệ hoặc đã hết hạn.');
+    }
+
+    if (user.forgotPasswordBlockUntil && user.forgotPasswordBlockUntil > new Date()) {
+      throw new ForbiddenException(`Vui lòng thử lại sau ${user.forgotPasswordBlockUntil.toLocaleTimeString()}`);
+    }
+
+    if (!user.forgotPasswordOtpCode || !user.forgotPasswordOtpExpires) {
+      throw new UnauthorizedException('Mã OTP không hợp lệ hoặc đã hết hạn.');
+    }
+
+    if (user.forgotPasswordOtpExpires < new Date()) {
+      user.forgotPasswordOtpCode = undefined;
+      user.forgotPasswordOtpExpires = undefined;
+      await user.save();
+      throw new UnauthorizedException('Mã OTP đã hết hạn.');
+    }
+
+    const otpMatches = await this.compareDeviceOtp(otpCode, user.forgotPasswordOtpCode);
+    if (!otpMatches) {
+      user.forgotPasswordOtpAttempts = (user.forgotPasswordOtpAttempts || 0) + 1;
+      if (user.forgotPasswordOtpAttempts >= 3) {
+        user.forgotPasswordBlockUntil = new Date(Date.now() + 5 * 60 * 1000); // 5 mins
+        user.forgotPasswordOtpCode = undefined;
+        user.forgotPasswordOtpExpires = undefined;
+        await user.save();
+        throw new ForbiddenException('Bạn đã nhập sai quá nhiều lần. Vui lòng thử lại sau 5 phút.');
+      }
+      await user.save();
+      throw new UnauthorizedException('Mã OTP không hợp lệ.');
+    }
+
+    // OTP correct, clear attempts but keep block logic clear
+    user.forgotPasswordOtpCode = undefined;
+    user.forgotPasswordOtpExpires = undefined;
+    user.forgotPasswordOtpAttempts = 0;
+    user.forgotPasswordBlockUntil = undefined;
+    await user.save();
+
+    // Create a temporary token for resetting password
+    const payload = this.buildAuthPayload(user);
+    const tempToken = this.jwtService.sign(
+      { ...payload, purpose: 'forgot_password_reset' },
+      { expiresIn: '15m' }, // 15 mins to reset password
+    );
+
+    return {
+      message: 'Mã OTP hợp lệ.',
+      resetToken: tempToken,
+    };
+  }
+
+  async resetPasswordWithToken(token: string, newPassword: string) {
+    let decoded;
+    try {
+      decoded = this.jwtService.verify(token);
+    } catch (e) {
+      throw new UnauthorizedException('Token không hợp lệ hoặc đã hết hạn.');
+    }
+
+    if (decoded.purpose !== 'forgot_password_reset') {
+      throw new UnauthorizedException('Token không hợp lệ cho tác vụ này.');
+    }
+
+    const userDoc = await this.userModel.findById(decoded.sub).exec();
+    if (!userDoc) {
+      throw new UnauthorizedException('Người dùng không tồn tại.');
+    }
+
+    // Check if new password is same as old
+    const sameAsOld = await bcrypt.compare(newPassword, userDoc.passwordHash);
+    if (sameAsOld) {
+      throw new UnauthorizedException('Mật khẩu mới không được trùng với mật khẩu cũ');
+    }
+
+    userDoc.passwordHash = await bcrypt.hash(newPassword, 10);
+    userDoc.mustChangePassword = false;
+    userDoc.authVersion = (userDoc.authVersion || 1) + 1;
+    
+    // Clear any lock or attempts due to forgotten password or login attempts
+    userDoc.loginAttempts = 0;
+    userDoc.lockUntil = undefined;
+    userDoc.forgotPasswordBlockUntil = undefined;
+    
+    await userDoc.save();
+
+    const payload = this.buildAuthPayload(userDoc);
     return {
       access_token: this.jwtService.sign(payload),
       message: 'Đổi mật khẩu thành công.',

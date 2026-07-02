@@ -87,12 +87,19 @@ export class EmailService {
     email: string,
     otp: string,
     name?: string,
-    purpose: 'device' | 'signup' = 'device',
+    purpose: 'device' | 'signup' | 'forgot_password' = 'device',
   ) {
     if (purpose === 'signup') {
       return {
         subject: 'Ma OTP dang ky cua hang TraSua POS',
         text: `Xin chao ${name || email},\n\nMa OTP xac minh dang ky cua hang cua ban la: ${otp}\nMa co hieu luc trong 15 phut.`,
+      };
+    }
+
+    if (purpose === 'forgot_password') {
+      return {
+        subject: 'Ma OTP khoi phuc mat khau TraSua POS',
+        text: `Xin chao ${name || email},\n\nMa OTP khoi phuc mat khau cua ban la: ${otp}\nKhong chia se ma nay cho bat ky ai. Ma co hieu luc trong 15 phut.`,
       };
     }
 
@@ -106,7 +113,7 @@ export class EmailService {
     email: string,
     otp: string,
     name?: string,
-    purpose: 'device' | 'signup' = 'device',
+    purpose: 'device' | 'signup' | 'forgot_password' = 'device',
     metadata: { tenantId?: string; userId?: string } = {},
   ): Promise<void> {
     const apiKey = this.getConfig('RESEND_API_KEY');
@@ -233,6 +240,27 @@ export class EmailService {
 
     if (this.hasResendConfig()) {
       await this.sendViaResend(email, otp, name, 'signup');
+      return { delivered: true };
+    }
+
+    throw new ServiceUnavailableException(
+      'RESEND_API_KEY hoac RESEND_FROM chua duoc cau hinh. He thong chi gui OTP qua Resend.',
+    );
+  }
+
+  async sendForgotPasswordOtp(
+    email: string,
+    otp: string,
+    name?: string,
+  ): Promise<{ delivered: boolean }> {
+    if (!email) {
+      throw new ServiceUnavailableException(
+        'Tai khoan chua co email de nhan OTP khoi phuc mat khau',
+      );
+    }
+
+    if (this.hasResendConfig()) {
+      await this.sendViaResend(email, otp, name, 'forgot_password');
       return { delivered: true };
     }
 
