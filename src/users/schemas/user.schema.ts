@@ -126,6 +126,9 @@ export class User {
   forgotPasswordBlockUntil?: Date;
 
   @Prop({ default: 0 })
+  forgotPasswordLockPhase?: number;
+
+  @Prop({ default: 0 })
   loginAttempts: number;
 
   @Prop()

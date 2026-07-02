@@ -489,13 +489,14 @@ export class AuthService {
     }
 
     if (user.forgotPasswordBlockUntil && user.forgotPasswordBlockUntil > new Date()) {
-      throw new ForbiddenException(`Vui lòng thử lại sau ${user.forgotPasswordBlockUntil.toLocaleTimeString()}`);
+      throw new ForbiddenException(`Vui lòng thử lại sau khoảng thời gian khóa.`);
     }
 
     const otp = this.createOtpCode();
     user.forgotPasswordOtpCode = await bcrypt.hash(otp, 10);
-    user.forgotPasswordOtpExpires = new Date(Date.now() + 15 * 60 * 1000);
+    user.forgotPasswordOtpExpires = new Date(Date.now() + 60 * 1000);
     user.forgotPasswordOtpAttempts = 0;
+    // Do not reset lock phase here so that the next penalty can be applied if they fail again
     await user.save();
 
     try {
@@ -517,7 +518,7 @@ export class AuthService {
     }
 
     if (user.forgotPasswordBlockUntil && user.forgotPasswordBlockUntil > new Date()) {
-      throw new ForbiddenException(`Vui lòng thử lại sau ${user.forgotPasswordBlockUntil.toLocaleTimeString()}`);
+      throw new ForbiddenException(`Tài khoản đang bị khóa. Vui lòng thử lại sau.`);
     }
 
     if (!user.forgotPasswordOtpCode || !user.forgotPasswordOtpExpires) {
@@ -534,22 +535,38 @@ export class AuthService {
     const otpMatches = await this.compareDeviceOtp(otpCode, user.forgotPasswordOtpCode);
     if (!otpMatches) {
       user.forgotPasswordOtpAttempts = (user.forgotPasswordOtpAttempts || 0) + 1;
-      if (user.forgotPasswordOtpAttempts >= 3) {
-        user.forgotPasswordBlockUntil = new Date(Date.now() + 5 * 60 * 1000); // 5 mins
+      const phase = user.forgotPasswordLockPhase || 0;
+
+      if (phase === 0 && user.forgotPasswordOtpAttempts >= 5) {
+        user.forgotPasswordBlockUntil = new Date(Date.now() + 30 * 1000); // 30 seconds
+        user.forgotPasswordLockPhase = 1;
+        user.forgotPasswordOtpAttempts = 0;
         user.forgotPasswordOtpCode = undefined;
         user.forgotPasswordOtpExpires = undefined;
         await user.save();
-        throw new ForbiddenException('Bạn đã nhập sai quá nhiều lần. Vui lòng thử lại sau 5 phút.');
+        throw new ForbiddenException('Bạn đã nhập sai 5 lần. Vui lòng thử lại sau 30 giây.');
+      } else if (phase === 1 && user.forgotPasswordOtpAttempts >= 3) {
+        user.forgotPasswordBlockUntil = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+        user.forgotPasswordLockPhase = 2;
+        user.forgotPasswordOtpAttempts = 0;
+        user.forgotPasswordOtpCode = undefined;
+        user.forgotPasswordOtpExpires = undefined;
+        await user.save();
+        throw new ForbiddenException('Bạn đã nhập sai thêm 3 lần. Tính năng quên mật khẩu tạm khóa 1 giờ.');
+      } else if (phase >= 2) {
+        throw new ForbiddenException('Tính năng quên mật khẩu đang bị khóa.');
       }
+
       await user.save();
       throw new UnauthorizedException('Mã OTP không hợp lệ.');
     }
 
-    // OTP correct, clear attempts but keep block logic clear
+    // OTP correct, clear attempts and phase
     user.forgotPasswordOtpCode = undefined;
     user.forgotPasswordOtpExpires = undefined;
     user.forgotPasswordOtpAttempts = 0;
     user.forgotPasswordBlockUntil = undefined;
+    user.forgotPasswordLockPhase = 0;
     await user.save();
 
     // Create a temporary token for resetting password
@@ -596,6 +613,7 @@ export class AuthService {
     userDoc.loginAttempts = 0;
     userDoc.lockUntil = undefined;
     userDoc.forgotPasswordBlockUntil = undefined;
+    userDoc.forgotPasswordLockPhase = 0;
     
     await userDoc.save();
 
