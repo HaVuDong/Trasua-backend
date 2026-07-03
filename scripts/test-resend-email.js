@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { randomInt } = require('crypto');
 const { Resend } = require('resend');
 
 function parseArg(name) {
@@ -60,7 +61,7 @@ async function main() {
     process.exit(1);
   }
 
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const otp = randomInt(100000, 1000000).toString();
   const resend = new Resend(apiKey);
   const { data, error } = await resend.emails.send({
     from,

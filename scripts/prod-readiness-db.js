@@ -9,9 +9,13 @@ const command = process.argv[2] || 'audit';
 const flags = new Set(process.argv.slice(3));
 
 const OPEN_PRINT_STATUSES = ['REQUESTED', 'PRINTING'];
+const OPEN_CUSTOMER_PAYMENT_STATUSES = ['PENDING'];
 const OLD_PRINT_JOB_KEY = { tenantId: 1, invoiceId: 1, type: 1, status: 1 };
 const NEW_PRINT_JOB_KEY = { tenantId: 1, invoiceId: 1, type: 1 };
 const NEW_PRINT_JOB_INDEX_NAME = 'uniq_open_print_job_per_invoice_type';
+const CUSTOMER_PAYMENT_OPEN_KEY = { tenantId: 1, sessionId: 1, provider: 1 };
+const CUSTOMER_PAYMENT_OPEN_INDEX_NAME =
+  'uniq_open_customer_payment_per_session_provider';
 
 const moneyAudits = [
   {
@@ -43,6 +47,24 @@ const moneyAudits = [
       'finalSalary',
       'allowances.amount',
       'deductions.amount',
+    ],
+  },
+  {
+    collection: 'users',
+    paths: ['salaryConfig.baseHourly', 'salaryConfig.baseShift'],
+  },
+  {
+    collection: 'orders',
+    paths: [
+      'items.price',
+      'totalAmount',
+      'discount',
+      'vat',
+      'serviceCharge',
+      'finalAmount',
+      'items.costSnapshot.totalCost',
+      'items.costSnapshot.ingredients.costPriceSnapshot',
+      'items.costSnapshot.ingredients.costAmount',
     ],
   },
   {
@@ -157,6 +179,16 @@ function isOpenPrintPartial(partial) {
     Array.isArray(statuses) &&
     OPEN_PRINT_STATUSES.every((status) => statuses.includes(status))
   );
+}
+
+function isOpenCustomerPaymentPartial(partial) {
+  const statuses = partial?.status?.$in;
+  if (Array.isArray(statuses)) {
+    return OPEN_CUSTOMER_PAYMENT_STATUSES.every((status) =>
+      statuses.includes(status),
+    );
+  }
+  return partial?.status === 'PENDING';
 }
 
 function getValuesByPath(value, parts) {
@@ -299,6 +331,101 @@ async function auditDuplicateOpenPrintJobs(db) {
   ];
 }
 
+async function auditCustomerPaymentIndexes(db) {
+  const collection = await getCollection(db, 'customerpayments');
+  if (!collection) {
+    return [statusLine('WARN', 'customerpayments collection missing')];
+  }
+
+  const indexes = await collection.indexes();
+  const newIndexes = indexes.filter(
+    (index) =>
+      sameKey(index.key, CUSTOMER_PAYMENT_OPEN_KEY) &&
+      index.unique === true &&
+      isOpenCustomerPaymentPartial(index.partialFilterExpression),
+  );
+
+  return [
+    newIndexes.length
+      ? statusLine(
+          'PASS',
+          'customer payment open-session unique index exists',
+          newIndexes.map((index) => index.name).join(', '),
+        )
+      : statusLine(
+          'FAIL',
+          'customer payment open-session unique index missing',
+        ),
+  ];
+}
+
+async function auditDuplicatePendingCustomerPayments(db) {
+  const collection = await getCollection(db, 'customerpayments');
+  if (!collection) {
+    return [statusLine('WARN', 'customer payment duplicate audit skipped')];
+  }
+
+  const duplicates = await collection
+    .aggregate([
+      { $match: { status: { $in: OPEN_CUSTOMER_PAYMENT_STATUSES } } },
+      {
+        $group: {
+          _id: {
+            tenantId: '$tenantId',
+            sessionId: '$sessionId',
+            provider: '$provider',
+          },
+          count: { $sum: 1 },
+          ids: { $push: '$_id' },
+        },
+      },
+      { $match: { count: { $gt: 1 } } },
+      { $limit: 10 },
+    ])
+    .toArray();
+
+  if (duplicates.length === 0) {
+    return [
+      statusLine('PASS', 'no duplicate pending customer payments'),
+    ];
+  }
+
+  return [
+    statusLine(
+      'FAIL',
+      'duplicate pending customer payments found',
+      duplicates
+        .map(
+          (row) =>
+            `${row._id.sessionId}/${row._id.provider || 'PAYOS'}: ${
+              row.count
+            }; ids=${row.ids.join(',')}`,
+        )
+        .join('; '),
+    ),
+  ];
+}
+
+async function auditUserAuthVersion(db) {
+  const collection = await getCollection(db, 'users');
+  if (!collection) {
+    return [statusLine('WARN', 'users collection missing')];
+  }
+
+  const missingCount = await collection.countDocuments({
+    authVersion: { $exists: false },
+  });
+  return [
+    missingCount === 0
+      ? statusLine('PASS', 'users have authVersion')
+      : statusLine(
+          'WARN',
+          'users missing authVersion',
+          `${missingCount}; code treats missing as version 1`,
+        ),
+  ];
+}
+
 async function auditIntegerPaths(db, audits, maxDocs, label, invalidPredicate) {
   const rows = [];
   for (const audit of audits) {
@@ -437,6 +564,12 @@ async function auditProductionReadiness(db) {
   const sections = [
     ['Print job indexes', await auditPrintJobIndexes(db)],
     ['Print job duplicate data', await auditDuplicateOpenPrintJobs(db)],
+    ['Customer payment indexes', await auditCustomerPaymentIndexes(db)],
+    [
+      'Customer payment duplicate data',
+      await auditDuplicatePendingCustomerPayments(db),
+    ],
+    ['User auth version', await auditUserAuthVersion(db)],
     [
       'Money integer VND audit',
       await auditIntegerPaths(
@@ -473,44 +606,78 @@ async function auditProductionReadiness(db) {
 async function migrateIndexes(db) {
   const apply = flags.has('--apply');
   const backupConfirmed = flags.has('--backup-confirmed');
-  const collection = await getCollection(db, 'printjobs');
-  if (!collection) {
-    console.log('[WARN] printjobs collection missing; nothing to migrate');
-    return;
-  }
+  const printCollection = await getCollection(db, 'printjobs');
+  const paymentCollection = await getCollection(db, 'customerpayments');
 
-  const duplicateRows = await auditDuplicateOpenPrintJobs(db);
-  const hasDuplicateFailure = duplicateRows.some(
-    (row) => row.status === 'FAIL',
-  );
+  const duplicatePrintRows = await auditDuplicateOpenPrintJobs(db);
+  const duplicatePaymentRows = await auditDuplicatePendingCustomerPayments(db);
+  const hasDuplicateFailure = [
+    ...duplicatePrintRows,
+    ...duplicatePaymentRows,
+  ].some((row) => row.status === 'FAIL');
   if (hasDuplicateFailure) {
-    printReport('Preflight duplicate check', duplicateRows);
+    printReport('Preflight print job duplicate check', duplicatePrintRows);
+    printReport(
+      'Preflight customer payment duplicate check',
+      duplicatePaymentRows,
+    );
     throw new Error(
-      'Cannot create print job unique index while duplicates exist',
+      'Cannot create unique indexes while duplicate open records exist',
     );
   }
 
-  const indexes = await collection.indexes();
-  const oldIndexes = indexes.filter((index) =>
-    sameKey(index.key, OLD_PRINT_JOB_KEY),
-  );
-  const hasNewIndex = indexes.some(
-    (index) =>
-      sameKey(index.key, NEW_PRINT_JOB_KEY) &&
-      index.unique === true &&
-      isOpenPrintPartial(index.partialFilterExpression),
-  );
+  let oldPrintIndexes = [];
+  let hasNewPrintIndex = false;
+  if (printCollection) {
+    const printIndexes = await printCollection.indexes();
+    oldPrintIndexes = printIndexes.filter((index) =>
+      sameKey(index.key, OLD_PRINT_JOB_KEY),
+    );
+    hasNewPrintIndex = printIndexes.some(
+      (index) =>
+        sameKey(index.key, NEW_PRINT_JOB_KEY) &&
+        index.unique === true &&
+        isOpenPrintPartial(index.partialFilterExpression),
+    );
+  }
+
+  let hasCustomerPaymentIndex = false;
+  if (paymentCollection) {
+    const paymentIndexes = await paymentCollection.indexes();
+    hasCustomerPaymentIndex = paymentIndexes.some(
+      (index) =>
+        sameKey(index.key, CUSTOMER_PAYMENT_OPEN_KEY) &&
+        index.unique === true &&
+        isOpenCustomerPaymentPartial(index.partialFilterExpression),
+    );
+  }
 
   if (!apply) {
     console.log('[DRY-RUN] migrate print job indexes');
-    console.log(
-      `[DRY-RUN] old indexes to drop: ${
-        oldIndexes.map((index) => index.name).join(', ') || '<none>'
-      }`,
-    );
-    console.log(
-      `[DRY-RUN] new index to create: ${hasNewIndex ? '<already exists>' : NEW_PRINT_JOB_INDEX_NAME}`,
-    );
+    if (!printCollection) {
+      console.log('[DRY-RUN] printjobs collection missing; skipped');
+    } else {
+      console.log(
+        `[DRY-RUN] old indexes to drop: ${
+          oldPrintIndexes.map((index) => index.name).join(', ') || '<none>'
+        }`,
+      );
+      console.log(
+        `[DRY-RUN] new index to create: ${hasNewPrintIndex ? '<already exists>' : NEW_PRINT_JOB_INDEX_NAME}`,
+      );
+    }
+    console.log('[DRY-RUN] migrate customer payment indexes');
+    if (!paymentCollection) {
+      console.log('[DRY-RUN] customerpayments collection missing; skipped');
+    } else {
+      console.log(
+        `[DRY-RUN] new index to create: ${
+          hasCustomerPaymentIndex
+            ? '<already exists>'
+            : CUSTOMER_PAYMENT_OPEN_INDEX_NAME
+        }`,
+      );
+    }
     return;
   }
 
@@ -520,22 +687,41 @@ async function migrateIndexes(db) {
     );
   }
 
-  for (const index of oldIndexes) {
-    console.log(`[APPLY] dropping old print job index ${index.name}`);
-    await collection.dropIndex(index.name);
+  if (!printCollection) {
+    console.log('[WARN] printjobs collection missing; skipped');
+  } else {
+    for (const index of oldPrintIndexes) {
+      console.log(`[APPLY] dropping old print job index ${index.name}`);
+      await printCollection.dropIndex(index.name);
+    }
+
+    if (!hasNewPrintIndex) {
+      console.log(`[APPLY] creating ${NEW_PRINT_JOB_INDEX_NAME}`);
+      await printCollection.createIndex(NEW_PRINT_JOB_KEY, {
+        name: NEW_PRINT_JOB_INDEX_NAME,
+        unique: true,
+        partialFilterExpression: {
+          status: { $in: OPEN_PRINT_STATUSES },
+        },
+      });
+    } else {
+      console.log('[PASS] new print job index already exists');
+    }
   }
 
-  if (!hasNewIndex) {
-    console.log(`[APPLY] creating ${NEW_PRINT_JOB_INDEX_NAME}`);
-    await collection.createIndex(NEW_PRINT_JOB_KEY, {
-      name: NEW_PRINT_JOB_INDEX_NAME,
+  if (!paymentCollection) {
+    console.log('[WARN] customerpayments collection missing; skipped');
+  } else if (!hasCustomerPaymentIndex) {
+    console.log(`[APPLY] creating ${CUSTOMER_PAYMENT_OPEN_INDEX_NAME}`);
+    await paymentCollection.createIndex(CUSTOMER_PAYMENT_OPEN_KEY, {
+      name: CUSTOMER_PAYMENT_OPEN_INDEX_NAME,
       unique: true,
       partialFilterExpression: {
-        status: { $in: OPEN_PRINT_STATUSES },
+        status: { $in: OPEN_CUSTOMER_PAYMENT_STATUSES },
       },
     });
   } else {
-    console.log('[PASS] new print job index already exists');
+    console.log('[PASS] customer payment open-session index already exists');
   }
 }
 
