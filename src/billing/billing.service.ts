@@ -254,12 +254,17 @@ export class BillingService {
       throw new BadRequestException('payOS is not configured');
     }
 
-    const payos = new PayOS({ clientId, apiKey, checksumKey });
-    let data;
-    try {
-      data = await payos.webhooks.verify(body as any);
-    } catch (error) {
-      throw new BadRequestException('Invalid payOS webhook signature');
+    let data = body.data as Record<string, unknown>;
+    const signature = String(body.signature || '');
+    const computedSignature = this.createPayosSignature(data, checksumKey);
+
+    if (signature !== computedSignature) {
+      const payos = new PayOS({ clientId, apiKey, checksumKey });
+      try {
+        data = (await payos.webhooks.verify(body as any)) as any;
+      } catch (error) {
+        throw new BadRequestException('Invalid payOS webhook signature');
+      }
     }
 
     const orderCode = Number(data.orderCode);
