@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { createHmac } from 'crypto';
+import { createHmac, randomInt } from 'crypto';
 import { Model, Types } from 'mongoose';
 import { Tenant, TenantDocument, TenantStatus, SubscriptionStatus } from '../tenants/schemas/tenant.schema';
 import {
@@ -61,7 +61,7 @@ export class BillingService {
 
   private async generateUniquePayosOrderCode(): Promise<number> {
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const orderCode = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+      const orderCode = Date.now() * 1000 + randomInt(0, 1000);
       const exists = await this.saasPaymentModel.exists({ orderCode }).exec();
       if (!exists) return orderCode;
     }
@@ -170,12 +170,59 @@ export class BillingService {
     if (!Types.ObjectId.isValid(paymentId)) {
       throw new BadRequestException('Invalid payment');
     }
-    const payment = await this.saasPaymentModel.findOne({
+    let payment = await this.saasPaymentModel.findOne({
       _id: new Types.ObjectId(paymentId),
       tenantId: new Types.ObjectId(tenantId),
     }).exec();
     if (!payment) throw new NotFoundException('Payment not found');
+
+    if (payment.status === CustomerPaymentStatus.PENDING) {
+      payment = (await this.syncPayosPayment(payment)) as any;
+    }
+
     return this.toPublicPayment(payment);
+  }
+
+  private async syncPayosPayment(payment: SaasPaymentDocument): Promise<SaasPaymentDocument> {
+    try {
+      const paymentIdOrCode = payment.providerPaymentLinkId || payment.orderCode;
+      const response = await fetch(`https://api-merchant.payos.vn/v2/payment-requests/${paymentIdOrCode}`, {
+        method: 'GET',
+        headers: {
+          'x-client-id': process.env.PAYOS_CLIENT_ID || '',
+          'x-api-key': process.env.PAYOS_API_KEY || '',
+        },
+      });
+
+      if (response.ok) {
+        const body = await response.json();
+        const data = this.asRecord(body?.data);
+        const providerStatus = this.getOptionalString(data?.status)?.toUpperCase();
+        
+        if (providerStatus === 'PAID') {
+          payment.status = CustomerPaymentStatus.PAID;
+          payment.paidAt = payment.paidAt || new Date();
+          await this.applyPaidSubscription(payment);
+          
+          await this.auditLogService.logSystem(payment.tenantId.toString(), 'SAAS_PAYMENT_PAID_SYNC', {
+            paymentId: payment._id.toString(),
+            orderCode: payment.orderCode,
+            amount: payment.amount,
+            plan: payment.plan,
+            months: payment.months,
+            provider: payment.provider,
+          });
+          
+          await payment.save();
+        } else if (providerStatus === 'CANCELLED') {
+          payment.status = CustomerPaymentStatus.CANCELLED;
+          await payment.save();
+        }
+      }
+    } catch (error) {
+      // Ignore sync errors and just return current payment state
+    }
+    return payment;
   }
 
   async handlePayosWebhookIfSaas(body: Record<string, unknown>) {
@@ -275,8 +322,8 @@ export class BillingService {
       orderCode: payload.orderCode,
       amount: payload.amount,
       description: payload.description,
-      returnUrl: process.env.SAAS_PAYOS_RETURN_URL || process.env.PAYOS_RETURN_URL || 'https://app-ql-tra-sua.vercel.app',
-      cancelUrl: process.env.SAAS_PAYOS_CANCEL_URL || process.env.PAYOS_CANCEL_URL || 'https://app-ql-tra-sua.vercel.app',
+      returnUrl: process.env.SAAS_PAYOS_RETURN_URL || 'https://app-ql-tra-sua.vercel.app',
+      cancelUrl: process.env.SAAS_PAYOS_CANCEL_URL || 'https://app-ql-tra-sua.vercel.app',
     };
     requestBody.signature = this.createPayosSignature(requestBody, checksumKey);
 
