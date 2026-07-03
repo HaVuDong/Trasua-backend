@@ -99,15 +99,34 @@ export class BillingService {
       .limit(5)
       .exec();
 
+    // Auto-sync any PENDING payments
+    for (let i = 0; i < latestPayments.length; i++) {
+      if (latestPayments[i].status === CustomerPaymentStatus.PENDING) {
+        latestPayments[i] = await this.syncPayosPayment(latestPayments[i] as any);
+      }
+    }
+
+    // Refresh tenant info if a payment was synced and paid
+    let refreshedTenant = tenant;
+    if (latestPayments.some(p => p.status === CustomerPaymentStatus.PAID)) {
+      refreshedTenant = await this.tenantModel.findById(tenantId).exec() || tenant;
+    }
+    
+    const finalPlan = getSaasPlan(refreshedTenant.subscription?.plan);
+    const finalEndDate = refreshedTenant.subscription?.endDate ? new Date(refreshedTenant.subscription.endDate) : null;
+    const finalDaysRemaining = finalEndDate
+      ? Math.max(0, Math.ceil((finalEndDate.getTime() - Date.now()) / (24 * 60 * 60 * 1000)))
+      : 0;
+
     return {
       tenant: {
-        _id: tenant._id.toString(),
-        name: tenant.name,
-        status: tenant.status,
+        _id: refreshedTenant._id.toString(),
+        name: refreshedTenant.name,
+        status: refreshedTenant.status,
       },
-      subscription: tenant.subscription,
-      plan,
-      daysRemaining,
+      subscription: refreshedTenant.subscription,
+      plan: finalPlan,
+      daysRemaining: finalDaysRemaining,
       payments: latestPayments.map((payment) => this.toPublicPayment(payment)),
     };
   }
