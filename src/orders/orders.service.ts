@@ -5,6 +5,7 @@ import {
   ForbiddenException,
   Logger,
   Optional,
+  OnModuleInit,
 } from '@nestjs/common';
 import { PayOS } from '@payos/node';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
@@ -125,7 +126,7 @@ type IngredientRequirement = {
 };
 
 @Injectable()
-export class OrdersService {
+export class OrdersService implements OnModuleInit {
   private readonly logger = new Logger(OrdersService.name);
 
   constructor(
@@ -150,6 +151,41 @@ export class OrdersService {
     private auditLogService: AuditLogService,
     @Optional() private cashierService?: CashierService,
   ) {}
+
+  onModuleInit() {
+    setInterval(() => {
+      this.autoCleanupEmptySessions().catch(err => this.logger.error('Auto cleanup empty sessions failed', err));
+    }, 10 * 60 * 1000);
+  }
+
+  private async autoCleanupEmptySessions() {
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+    const emptySessions = await this.tableSessionModel.find({
+      status: TableSessionStatus.OPEN,
+      lastActivityAt: { $lt: tenMinutesAgo }
+    }).exec();
+
+    for (const session of emptySessions) {
+      const orderCount = await this.orderModel.countDocuments({
+        sessionId: session._id,
+      });
+
+      if (orderCount === 0) {
+        this.logger.log(`Auto closing empty session ${session._id}`);
+        session.status = TableSessionStatus.CLOSED;
+        session.lastActivityAt = new Date();
+        await session.save();
+
+        const table = await this.tableModel.findById(session.tableId).exec();
+        if (table) {
+          table.status = TableStatus.EMPTY;
+          await table.save();
+        }
+
+        this.chatGateway.sendTableSyncEvent(session.tenantId.toString());
+      }
+    }
+  }
 
   private toPublicTenantObjectId(
     tenantId: string,
@@ -700,9 +736,9 @@ export class OrdersService {
     const computedSignature = this.createPayosSignature(data, checksumKey);
 
     if (signature !== computedSignature) {
-      const payos = new PayOS({ clientId, apiKey, checksumKey });
+      const payos = new PayOS(clientId, apiKey, checksumKey);
       try {
-        data = (await payos.webhooks.verify(body as any)) as any;
+        data = payos.verifyPaymentWebhookData(body as any) as any;
       } catch (error) {
         throw new BadRequestException('Invalid payOS webhook signature');
       }
