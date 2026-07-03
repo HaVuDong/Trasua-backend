@@ -1479,13 +1479,12 @@ export class OrdersService implements OnModuleInit {
           .findOne({
             _id: sessionObjectId,
             tenantId: tenantObjectId,
-            status: TableSessionStatus.OPEN,
           })
           .session(session)
           .exec();
 
         if (!tableSession) {
-          throw new NotFoundException('Open table session not found');
+          throw new NotFoundException('Table session not found');
         }
 
         const cashierShift = this.cashierService
@@ -2029,13 +2028,12 @@ export class OrdersService implements OnModuleInit {
           .findOne({
             _id: sessionObjectId,
             tenantId: tenantObjectId,
-            status: TableSessionStatus.OPEN,
           })
           .session(session)
           .exec();
 
         if (!tableSession) {
-          throw new NotFoundException('Open table session not found');
+          throw new NotFoundException('Table session not found');
         }
 
         const cashierShift = this.cashierService
