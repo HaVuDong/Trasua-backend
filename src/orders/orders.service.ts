@@ -1390,7 +1390,7 @@ export class OrdersService {
         .exec();
 
       if (otherOrders === 0) {
-        table.status = TableStatus.CLEANING;
+        table.status = TableStatus.EMPTY;
         await table.save({ session });
         await this.closeOpenTableSessions(
           new Types.ObjectId(tenantId),
@@ -1420,7 +1420,7 @@ export class OrdersService {
     await session.save();
 
     if (table) {
-      table.status = TableStatus.CLEANING;
+      table.status = TableStatus.EMPTY;
       await table.save();
     }
 
@@ -1667,7 +1667,10 @@ export class OrdersService {
             (sum, item) => sum + item.quantity,
             0,
           );
-          const totalPaidAmount = tableSession.totalPaidAmount || 0;
+          let totalPaidAmount = tableSession.totalPaidAmount || 0;
+          if (tableSession.paymentStatus === TableSessionPaymentStatus.PAID && totalPaidAmount === 0) {
+            totalPaidAmount = subtotal;
+          }
           const finalAmount = Math.max(0, subtotal - totalPaidAmount);
 
           return {
