@@ -62,12 +62,13 @@ function getSocketCorsOrigin() {
     process.env.SOCKET_ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS,
   );
   if (configured.length > 0) return configured;
-  return process.env.NODE_ENV === 'production' ? [] : '*';
+  return process.env.NODE_ENV === 'production' ? true : '*';
 }
 
 @WebSocketGateway({
   cors: {
     origin: getSocketCorsOrigin(),
+    credentials: true,
   },
 })
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
