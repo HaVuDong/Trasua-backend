@@ -5,6 +5,7 @@ import { Tenant, TenantDocument, TenantStatus, SubscriptionStatus } from './sche
 import { User, UserDocument, Role, UserStatus } from '../users/schemas/user.schema';
 import { CreateTenantDto } from './dto/create-tenant.dto';
 import { getSaasPlan } from '../billing/saas-plans';
+import { randomBytes } from 'crypto';
 // @ts-ignore
 import * as bcrypt from 'bcrypt';
 
@@ -22,7 +23,7 @@ export class TenantsService implements OnModuleInit {
   }
 
   private generateTempPassword() {
-    return Math.random().toString(36).slice(-10);
+    return randomBytes(12).toString('base64url').slice(0, 16);
   }
 
   async onModuleInit() {
@@ -331,9 +332,10 @@ export class TenantsService implements OnModuleInit {
     const admin = await this.userModel.findOne({ tenantId, role: Role.ADMIN }).exec();
     if (!admin) throw new NotFoundException('Admin user not found for this tenant');
 
-    const tempPassword = Math.random().toString(36).slice(-8);
+    const tempPassword = this.generateTempPassword();
     admin.passwordHash = await bcrypt.hash(tempPassword, 10);
     admin.mustChangePassword = true;
+    admin.authVersion = (admin.authVersion || 1) + 1;
     admin.trustedDevices = [];
     admin.localOtpCode = undefined;
     admin.localOtpExpires = undefined;

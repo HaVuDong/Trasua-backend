@@ -82,6 +82,11 @@ describe('InventoryService stock and recipe safety', () => {
       ...payload,
       save: jest.fn().mockResolvedValue(payload),
     }));
+    (ticketModel as any).create = jest
+      .fn()
+      .mockImplementation(async (payloads) =>
+        payloads.map((payload: any) => ({ ...payload, _id: new Types.ObjectId() })),
+      );
     adjustmentModel = jest.fn().mockImplementation((payload) => ({
       ...payload,
       save: jest.fn().mockResolvedValue(payload),
@@ -119,11 +124,14 @@ describe('InventoryService stock and recipe safety', () => {
     const creatorId = new Types.ObjectId().toString();
     const itemId = new Types.ObjectId().toString();
     const itemDoc = {
+      _id: new Types.ObjectId(itemId),
       stock: 10,
       costPrice: 1000,
       save: jest.fn().mockResolvedValue(undefined),
     };
-    itemModel.findOne.mockReturnValue(execResult(itemDoc));
+    itemModel.find.mockReturnValue({
+      session: jest.fn().mockReturnValue(execResult([itemDoc])),
+    });
 
     await service.importStock(tenantId, creatorId, {
       provider: 'Supplier',

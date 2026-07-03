@@ -1,3 +1,23 @@
+function parseOriginList(value?: string) {
+  return String(value || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function getCorsOrigin() {
+  const configured = parseOriginList(process.env.ALLOWED_ORIGINS);
+  if (process.env.NODE_ENV === 'production') {
+    if (configured.length === 0 || configured.includes('*')) {
+      throw new Error(
+        'ALLOWED_ORIGINS is required in production and must not include *',
+      );
+    }
+    return configured;
+  }
+  return configured.length > 0 ? configured : true;
+}
+
 async function bootstrap() {
   const shouldUseRedisMock =
     process.env.USE_REDIS_MOCK === 'true' &&
@@ -13,11 +33,20 @@ async function bootstrap() {
   const { NestFactory } = await import('@nestjs/core');
   const { AppModule } = await import('./app.module.js');
   const { DocumentBuilder, SwaggerModule } = await import('@nestjs/swagger');
+  const { default: helmet } = await import('helmet');
 
   const app = await NestFactory.create(AppModule, { rawBody: true });
 
-  // Enable CORS
-  app.enableCors();
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+    }),
+  );
+
+  app.enableCors({
+    origin: getCorsOrigin(),
+    credentials: true,
+  });
 
   // Swagger Documentation Setup
   const config = new DocumentBuilder()

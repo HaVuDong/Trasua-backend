@@ -99,3 +99,13 @@ export const CustomerPaymentSchema =
   SchemaFactory.createForClass(CustomerPayment);
 
 CustomerPaymentSchema.index({ tenantId: 1, sessionId: 1, status: 1 });
+CustomerPaymentSchema.index(
+  { tenantId: 1, sessionId: 1, provider: 1 },
+  {
+    name: 'uniq_open_customer_payment_per_session_provider',
+    unique: true,
+    partialFilterExpression: {
+      status: { $in: [CustomerPaymentStatus.PENDING] },
+    },
+  },
+);

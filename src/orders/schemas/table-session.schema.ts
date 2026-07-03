@@ -58,6 +58,9 @@ export class TableSession {
   @Prop({ type: Types.ObjectId, ref: 'User' })
   paidBy?: Types.ObjectId;
 
+  @Prop({ default: 0 })
+  totalPaidAmount: number;
+
   @Prop({ type: String, enum: TableSessionPaymentMethod })
   paymentMethod?: TableSessionPaymentMethod;
 }

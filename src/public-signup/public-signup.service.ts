@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import { randomInt } from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { Tenant, TenantDocument, TenantStatus, SubscriptionStatus } from '../tenants/schemas/tenant.schema';
 import { User, UserDocument, Role } from '../users/schemas/user.schema';
@@ -52,7 +53,7 @@ export class PublicSignupService {
   }
 
   private createOtp() {
-    return String(Math.floor(100000 + Math.random() * 900000));
+    return String(randomInt(100000, 1000000));
   }
 
   private addMinutes(date: Date, minutes: number) {

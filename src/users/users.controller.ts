@@ -50,6 +50,14 @@ export class UsersController {
     });
   }
 
+  private emitSessionRevoked(
+    targetUserId: string,
+    reason: 'LOCKED' | 'DELETED' | 'PASSWORD_RESET' | 'LOGOUT_ALL',
+  ) {
+    if (!targetUserId) return;
+    this.chatGateway.revokeUserSession(targetUserId, reason);
+  }
+
   @Post()
   @Roles(Role.ADMIN, Role.MANAGER)
   async create(
@@ -212,6 +220,7 @@ export class UsersController {
       { targetUserId: id },
       normalizedIp,
     );
+    this.emitSessionRevoked(id, 'PASSWORD_RESET');
     return result;
   }
 
@@ -235,6 +244,7 @@ export class UsersController {
       { targetUserId: id },
       normalizedIp,
     );
+    this.emitSessionRevoked(id, 'LOCKED');
     return result;
   }
 
@@ -281,6 +291,7 @@ export class UsersController {
       { targetUserId: id },
       normalizedIp,
     );
+    this.emitSessionRevoked(id, 'DELETED');
     return result;
   }
 
@@ -378,7 +389,9 @@ export class UsersController {
 
   @Post(':id/logout-all')
   @Roles(Role.ADMIN)
-  logoutAll(@CurrentUser() user: any, @Param('id') id: string) {
-    return this.usersService.logoutAllSessions(user.tenantId, id);
+  async logoutAll(@CurrentUser() user: any, @Param('id') id: string) {
+    const result = await this.usersService.logoutAllSessions(user.tenantId, id);
+    this.emitSessionRevoked(id, 'LOGOUT_ALL');
+    return result;
   }
 }

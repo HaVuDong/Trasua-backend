@@ -9,7 +9,12 @@ import {
 import { Reflector } from '@nestjs/core';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
-import { Role, User, UserDocument } from '../../users/schemas/user.schema';
+import {
+  Role,
+  User,
+  UserDocument,
+  UserStatus,
+} from '../../users/schemas/user.schema';
 import {
   Tenant,
   TenantDocument,
@@ -30,6 +35,8 @@ type AuthRequestUser = {
   tenantId?: string;
   permissionOverrides?: PermissionOverrides;
   effectivePermissions?: Permission[];
+  permissionVersion?: number;
+  authVersion?: number;
 };
 
 type GuardRequest = {
@@ -42,7 +49,10 @@ type GuardRequest = {
 type LeanPermissionUser = {
   role: Role;
   tenantId?: Types.ObjectId;
+  status?: UserStatus;
   permissionOverrides?: PermissionOverrides;
+  permissionVersion?: number;
+  authVersion?: number;
 };
 
 @Injectable()
@@ -123,11 +133,27 @@ export class RolesGuard implements CanActivate {
 
     const userDoc = (await this.userModel
       .findOne(query)
-      .select('role tenantId permissionOverrides')
+      .select(
+        'role tenantId status permissionOverrides permissionVersion authVersion',
+      )
       .lean()
       .exec()) as LeanPermissionUser | null;
 
-    if (!userDoc) return;
+    if (!userDoc) {
+      throw new HttpException('User not found', HttpStatus.UNAUTHORIZED);
+    }
+    if ((userDoc.status || UserStatus.ACTIVE) !== UserStatus.ACTIVE) {
+      throw new HttpException(
+        'Tai khoan khong con hoat dong',
+        HttpStatus.UNAUTHORIZED,
+      );
+    }
+    if ((user.authVersion || 1) !== (userDoc.authVersion || 1)) {
+      throw new HttpException(
+        'Phien dang nhap da bi thu hoi',
+        HttpStatus.UNAUTHORIZED,
+      );
+    }
 
     user.role = userDoc.role;
     user.tenantId = userDoc.tenantId
@@ -137,6 +163,8 @@ export class RolesGuard implements CanActivate {
       allow: [],
       deny: [],
     };
+    user.permissionVersion = userDoc.permissionVersion || 1;
+    user.authVersion = userDoc.authVersion || 1;
     user.effectivePermissions = getEffectivePermissions(
       user.role,
       user.permissionOverrides,

@@ -83,6 +83,15 @@ export class OrdersController {
     return this.ordersService.createCustomerRequest(tenantId, qrToken, dto);
   }
 
+  // 1b. Close Customer Session (if they choose NO on continue popup)
+  @Post(':tenantId/table-sessions/:sessionId/close')
+  closeCustomerSession(
+    @Param('tenantId') tenantId: string,
+    @Param('sessionId') sessionId: string,
+  ) {
+    return this.ordersService.closeCustomerSession(tenantId, sessionId);
+  }
+
   // 2. Staff Manual Order endpoint (requires IP whitelist)
   @Post('staff')
   @UseGuards(JwtAuthGuard, RolesGuard, IpWhitelistGuard)
@@ -143,6 +152,20 @@ export class OrdersController {
       user.userId,
       discount,
       discountType,
+    );
+  }
+
+  @Post('table-sessions/:sessionId/pay-balance')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
+  payBalanceTableSession(
+    @CurrentUser() user: any,
+    @Param('sessionId') sessionId: string,
+  ) {
+    return this.ordersService.payBalanceTableSession(
+      user.tenantId,
+      sessionId,
+      user.userId,
     );
   }
 

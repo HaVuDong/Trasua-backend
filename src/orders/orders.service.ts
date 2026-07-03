@@ -750,6 +750,9 @@ export class OrdersService {
               paidAt: savedPayment.paidAt || new Date(),
               lastActivityAt: new Date(),
             },
+            $inc: {
+              totalPaidAmount: savedPayment.amount,
+            },
           },
         )
         .exec();
@@ -859,6 +862,12 @@ export class OrdersService {
     tableSession.customerPhone =
       dto.customerPhone || tableSession.customerPhone;
     tableSession.lastActivityAt = new Date();
+    if (
+      tableSession.paymentStatus === TableSessionPaymentStatus.PAID ||
+      tableSession.paymentStatus === TableSessionPaymentStatus.REQUESTED
+    ) {
+      tableSession.paymentStatus = TableSessionPaymentStatus.UNPAID;
+    }
     await tableSession.save();
     await this.markTableServing(table);
 
@@ -905,6 +914,12 @@ export class OrdersService {
 
     const savedOrder = await order.save();
     tableSession.lastActivityAt = new Date();
+    if (
+      tableSession.paymentStatus === TableSessionPaymentStatus.PAID ||
+      tableSession.paymentStatus === TableSessionPaymentStatus.REQUESTED
+    ) {
+      tableSession.paymentStatus = TableSessionPaymentStatus.UNPAID;
+    }
     await tableSession.save();
     await this.markTableServing(table);
 
@@ -1383,6 +1398,169 @@ export class OrdersService {
     return savedOrder;
   }
 
+  async closeCustomerSession(tenantId: string, sessionId: string) {
+    const tenantObjectId = new Types.ObjectId(tenantId);
+    const session = await this.tableSessionModel
+      .findOne({ _id: sessionId, tenantId: tenantObjectId })
+      .exec();
+    
+    if (!session) throw new NotFoundException('Session not found');
+
+    const table = await this.tableModel
+      .findOne({ _id: session.tableId, tenantId: tenantObjectId })
+      .exec();
+
+    session.status = TableSessionStatus.CLOSED;
+    session.lastActivityAt = new Date();
+    await session.save();
+
+    if (table) {
+      table.status = TableStatus.CLEANING;
+      await table.save();
+    }
+
+    this.chatGateway.sendTableSyncEvent(tenantId);
+    return { success: true };
+  }
+
+  async payBalanceTableSession(
+    tenantId: string,
+    sessionId: string,
+    paidBy: string,
+  ) {
+    const tenantObjectId = new Types.ObjectId(tenantId);
+    const sessionObjectId = this.toObjectId(sessionId, 'Invalid table session');
+    
+    const payload = await runTransactionSensitive(
+      this.connection,
+      async (session) => {
+        const tableSession = await this.tableSessionModel
+          .findOne({
+            _id: sessionObjectId,
+            tenantId: tenantObjectId,
+            status: TableSessionStatus.OPEN,
+          })
+          .session(session)
+          .exec();
+
+        if (!tableSession) {
+          throw new NotFoundException('Open table session not found');
+        }
+
+        const cashierShift = this.cashierService
+          ? await this.cashierService.requireOpenShift(tenantId, session)
+          : undefined;
+
+        const orders = await this.orderModel
+          .find({
+            tenantId: tenantObjectId,
+            sessionId: sessionObjectId,
+            status: { $in: [OrderStatus.PENDING, OrderStatus.IN_PROGRESS] },
+          })
+          .session(session)
+          .exec();
+
+        const billItems = orders.flatMap((order: any) =>
+          order.items
+            .filter((item: any) => item.status !== OrderItemStatus.CANCELLED && !item.isFree)
+            .map((item: any) => ({ ...item }))
+        );
+        const subtotal = billItems.reduce((sum, item) => sum + item.subtotal, 0);
+        const totalPaidAmount = tableSession.totalPaidAmount || 0;
+        const finalAmount = Math.max(0, subtotal - totalPaidAmount);
+
+        if (finalAmount <= 0) {
+          throw new BadRequestException('Bàn này không còn nợ để thanh toán');
+        }
+
+        const paidAt = new Date();
+
+        await this.tableSessionModel
+          .updateOne(
+            { _id: sessionObjectId, tenantId: tenantObjectId },
+            {
+              $set: {
+                paymentStatus: TableSessionPaymentStatus.PAID,
+                paymentMethod: TableSessionPaymentMethod.MANUAL,
+                paidAt,
+                paidBy: new Types.ObjectId(paidBy),
+                lastActivityAt: new Date(),
+              },
+              $inc: {
+                totalPaidAmount: finalAmount,
+              },
+            },
+          )
+          .session(session)
+          .exec();
+
+        await this.customerRequestModel
+          .updateMany(
+            {
+              tenantId: tenantObjectId,
+              sessionId: sessionObjectId,
+              type: {
+                $in: [CustomerRequestType.PAY_CASH, CustomerRequestType.PAY_TRANSFER, CustomerRequestType.PRINT_BILL],
+              },
+              status: {
+                $in: [CustomerRequestStatus.PENDING, CustomerRequestStatus.ACKNOWLEDGED],
+              },
+            },
+            { $set: { status: CustomerRequestStatus.DONE } },
+          )
+          .session(session)
+          .exec();
+
+        if (this.cashierService && cashierShift) {
+          await this.cashierService.recordMovement({
+            tenantId,
+            shiftId: (cashierShift._id as Types.ObjectId).toString(),
+            type: CashMovementType.MANUAL_CHECKOUT,
+            amount: finalAmount,
+            paymentMethod: PaymentMethod.CASH,
+            sourceType: CashMovementSourceType.TABLE_SESSION,
+            sourceId: sessionId,
+            reason: 'Thanh toán tiếp phần dư',
+            createdBy: paidBy,
+            session,
+          });
+        }
+
+        return {
+          sessionId,
+          paymentStatus: TableSessionPaymentStatus.PAID,
+          paymentMethod: TableSessionPaymentMethod.MANUAL,
+          totalAmount: finalAmount,
+          paidAt,
+        };
+      },
+      `pay balance table session ${sessionId}`,
+      this.logger,
+    );
+
+    await this.auditLogService.log(
+      tenantId,
+      paidBy,
+      'TABLE_SESSION_PAY_BALANCE',
+      {
+        sessionId,
+        totalAmount: payload.totalAmount,
+        paymentMethod: payload.paymentMethod,
+        paidAt: payload.paidAt,
+      },
+    );
+
+    this.chatGateway.sendOrderEvent(tenantId, 'manualCheckoutCompleted', {
+      sessionId: payload.sessionId,
+      paymentStatus: payload.paymentStatus,
+      paymentMethod: payload.paymentMethod,
+      paidAt: payload.paidAt,
+    });
+    this.chatGateway.sendTableSyncEvent(tenantId);
+
+    return { success: true, payload };
+  }
+
   async getStaffWorkspace(tenantId: string) {
     const tenantObjectId = new Types.ObjectId(tenantId);
     const sessions = await this.tableSessionModel
@@ -1484,6 +1662,8 @@ export class OrdersService {
             (sum, item) => sum + item.quantity,
             0,
           );
+          const totalPaidAmount = tableSession.totalPaidAmount || 0;
+          const finalAmount = Math.max(0, subtotal - totalPaidAmount);
 
           return {
             sessionId,
@@ -1521,7 +1701,8 @@ export class OrdersService {
               itemCount: billItems.length,
               totalQuantity,
               subtotal,
-              finalAmount: subtotal,
+              finalAmount,
+              totalPaidAmount,
               items: billItems,
             },
           };
@@ -2014,6 +2195,8 @@ export class OrdersService {
       (sum, item) => sum + item.quantity,
       0,
     );
+    const totalPaidAmount = tableSession.totalPaidAmount || 0;
+    const finalAmount = Math.max(0, subtotal - totalPaidAmount);
 
     return {
       table: {
@@ -2030,6 +2213,7 @@ export class OrdersService {
         paidAt: tableSession.paidAt,
         openedAt: tableSession.openedAt,
         lastActivityAt: tableSession.lastActivityAt,
+        totalPaidAmount,
       },
       customer: {
         name: tableSession.customerName || '',
@@ -2041,7 +2225,8 @@ export class OrdersService {
         itemCount: billItems.length,
         totalQuantity,
         subtotal,
-        finalAmount: subtotal,
+        finalAmount,
+        totalPaidAmount,
         items: billItems,
       },
     };

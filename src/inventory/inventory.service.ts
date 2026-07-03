@@ -616,39 +616,28 @@ export class InventoryService {
     creatorId: string,
     dto: CreateImportDto,
   ): Promise<ImportTicket> {
-    const ticketItems = dto.items.map((item) => ({
-      itemId: new Types.ObjectId(item.itemId),
-      quantity: item.quantity,
-      costPrice: Math.round(Number(item.costPrice || 0)),
-    }));
+    if (!Array.isArray(dto.items) || dto.items.length === 0) {
+      throw new BadRequestException('Import must include at least one item');
+    }
+    if (!dto.provider?.trim()) {
+      throw new BadRequestException('Import provider is required');
+    }
 
-    const ticket = new this.ticketModel({
-      tenantId: new Types.ObjectId(tenantId),
-      items: ticketItems,
-      provider: dto.provider,
-      date: dto.date || new Date(),
-      notes: dto.notes,
-      createdBy: new Types.ObjectId(creatorId),
-    });
-
-    const savedTicket = await ticket.save();
-
-    // Update stocks and weighted average costPrice
-    for (const itemDto of dto.items) {
-      const item = await this.itemModel
-        .findOne({
-          _id: itemDto.itemId,
-          tenantId: new Types.ObjectId(tenantId),
-          status: { $ne: ItemStatus.DELETED },
-        })
-        .exec();
-
-      if (!item) {
-        throw new NotFoundException('Inventory item not found');
+    const tenantObjectId = new Types.ObjectId(tenantId);
+    const creatorObjectId = new Types.ObjectId(creatorId);
+    const normalized = new Map<
+      string,
+      {
+        itemId: Types.ObjectId;
+        quantity: number;
+        incomingValue: number;
       }
+    >();
 
-      const currentStock = Number(item.stock || 0);
-      const currentCost = Number(item.costPrice || 0);
+    for (const itemDto of dto.items) {
+      if (!Types.ObjectId.isValid(itemDto.itemId)) {
+        throw new BadRequestException('Inventory item id is invalid');
+      }
       const incomingQuantity = Number(itemDto.quantity || 0);
       const incomingCost = Math.round(Number(itemDto.costPrice || 0));
       if (!Number.isFinite(incomingQuantity) || incomingQuantity <= 0) {
@@ -658,21 +647,88 @@ export class InventoryService {
         throw new BadRequestException('Import cost price must be non-negative');
       }
 
-      const nextStock = currentStock + incomingQuantity;
-      const nextCost =
-        nextStock > 0
-          ? Math.round(
-              (currentStock * currentCost + incomingQuantity * incomingCost) /
-                nextStock,
-            )
-          : incomingCost;
-
-      item.stock = nextStock;
-      item.costPrice = nextCost;
-      await item.save();
+      const key = itemDto.itemId.toString();
+      const current = normalized.get(key);
+      if (current) {
+        current.quantity += incomingQuantity;
+        current.incomingValue += incomingQuantity * incomingCost;
+      } else {
+        normalized.set(key, {
+          itemId: new Types.ObjectId(itemDto.itemId),
+          quantity: incomingQuantity,
+          incomingValue: incomingQuantity * incomingCost,
+        });
+      }
     }
 
-    return savedTicket;
+    return runTransactionSensitive(
+      this.connection,
+      async (session) => {
+        const importItems = Array.from(normalized.values());
+        const itemIds = importItems.map((item) => item.itemId);
+        const items = await this.itemModel
+          .find({
+            _id: { $in: itemIds },
+            tenantId: tenantObjectId,
+            status: { $ne: ItemStatus.DELETED },
+          })
+          .session(session)
+          .exec();
+
+        if (items.length !== itemIds.length) {
+          throw new NotFoundException('Inventory item not found');
+        }
+
+        const itemById = new Map(
+          items.map((item) => [item._id.toString(), item]),
+        );
+
+        for (const importItem of importItems) {
+          const item = itemById.get(importItem.itemId.toString());
+          if (!item) throw new NotFoundException('Inventory item not found');
+
+          const currentStock = Number(item.stock || 0);
+          const currentCost = Number(item.costPrice || 0);
+          const incomingCost = Math.round(
+            importItem.incomingValue / importItem.quantity,
+          );
+          const nextStock = currentStock + importItem.quantity;
+          const nextCost =
+            nextStock > 0
+              ? Math.round(
+                  (currentStock * currentCost + importItem.incomingValue) /
+                    nextStock,
+                )
+              : incomingCost;
+
+          item.stock = nextStock;
+          item.costPrice = nextCost;
+          await item.save({ session });
+        }
+
+        const ticketItems = importItems.map((item) => ({
+          itemId: item.itemId,
+          quantity: item.quantity,
+          costPrice: Math.round(item.incomingValue / item.quantity),
+        }));
+        const [savedTicket] = await this.ticketModel.create(
+          [
+            {
+              tenantId: tenantObjectId,
+              items: ticketItems,
+              provider: dto.provider.trim(),
+              date: dto.date || new Date(),
+              notes: dto.notes,
+              createdBy: creatorObjectId,
+            },
+          ],
+          { session },
+        );
+
+        return savedTicket;
+      },
+      'inventory import stock',
+    );
   }
 
   async createAdjustment(

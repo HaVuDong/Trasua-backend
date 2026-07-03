@@ -15,13 +15,26 @@ import { Model, Types } from 'mongoose';
 import { ChatRoom, ChatRoomDocument } from './schemas/chat-room.schema';
 import { Message, MessageDocument } from './schemas/message.schema';
 import { SendMessageDto } from './dto/create-chat.dto';
+import {
+  User,
+  UserDocument,
+  UserStatus,
+} from '../users/schemas/user.schema';
 
 type SocketUser = {
   userId: string;
   tenantId?: string;
   role?: string;
   exp?: number;
+  authVersion?: number;
 };
+
+type SessionRevokedReason =
+  | 'LOCKED'
+  | 'DELETED'
+  | 'PASSWORD_RESET'
+  | 'LOGOUT_ALL'
+  | 'PASSWORD_CHANGED';
 
 type RoomEventPayload = {
   roomId?: string;
@@ -37,9 +50,24 @@ type TypingPayload = RoomEventPayload & {
   isTyping?: boolean;
 };
 
+function parseOrigins(value?: string) {
+  return String(value || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function getSocketCorsOrigin() {
+  const configured = parseOrigins(
+    process.env.SOCKET_ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS,
+  );
+  if (configured.length > 0) return configured;
+  return process.env.NODE_ENV === 'production' ? [] : '*';
+}
+
 @WebSocketGateway({
   cors: {
-    origin: '*',
+    origin: getSocketCorsOrigin(),
   },
 })
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -48,13 +76,14 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
-  // Track online users mapping userId -> socketId
-  private activeUsers = new Map<string, string>();
+  // Track online users mapping userId -> socketIds
+  private activeUsers = new Map<string, Set<string>>();
 
   constructor(
     private readonly jwtService: JwtService,
     @InjectModel(ChatRoom.name) private roomModel: Model<ChatRoomDocument>,
     @InjectModel(Message.name) private messageModel: Model<MessageDocument>,
+    @InjectModel(User.name) private userModel: Model<UserDocument>,
   ) {}
 
   private getClientToken(client: Socket): string {
@@ -71,7 +100,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return '';
   }
 
-  private authenticateClient(client: Socket): SocketUser | null {
+  private async authenticateClient(client: Socket): Promise<SocketUser | null> {
     const token = this.getClientToken(client);
     if (!token) return null;
 
@@ -81,13 +110,31 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         tenantId?: string;
         role?: string;
         exp?: number;
+        authVersion?: number;
       };
       if (!payload?.sub) return null;
+
+      const user = await this.userModel
+        .findById(payload.sub)
+        .select('tenantId role status authVersion')
+        .lean()
+        .exec();
+      if (!user || (user.status || UserStatus.ACTIVE) !== UserStatus.ACTIVE) {
+        return null;
+      }
+
+      const tokenAuthVersion = payload.authVersion || 1;
+      const currentAuthVersion = user.authVersion || 1;
+      if (tokenAuthVersion !== currentAuthVersion) {
+        return null;
+      }
+
       return {
         userId: payload.sub,
-        tenantId: payload.tenantId,
-        role: payload.role,
+        tenantId: user.tenantId ? user.tenantId.toString() : undefined,
+        role: user.role,
         exp: typeof payload.exp === 'number' ? payload.exp : undefined,
+        authVersion: currentAuthVersion,
       };
     } catch {
       return null;
@@ -121,6 +168,19 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   private getChatRoomName(roomId: string) {
     return `chat_${roomId}`;
+  }
+
+  private trackUserSocket(userId: string, socketId: string) {
+    const sockets = this.activeUsers.get(userId) || new Set<string>();
+    sockets.add(socketId);
+    this.activeUsers.set(userId, sockets);
+  }
+
+  private untrackUserSocket(userId: string, socketId: string) {
+    const sockets = this.activeUsers.get(userId);
+    if (!sockets) return;
+    sockets.delete(socketId);
+    if (sockets.size === 0) this.activeUsers.delete(userId);
   }
 
   private async findAccessibleRoom(client: Socket, roomId?: string) {
@@ -162,8 +222,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return { room, socketUser };
   }
 
-  handleConnection(client: Socket) {
-    const socketUser = this.authenticateClient(client);
+  async handleConnection(client: Socket) {
+    const socketUser = await this.authenticateClient(client);
     if (!socketUser) {
       this.logger.warn(`Rejected unauthenticated socket: ${client.id}`);
       client.disconnect(true);
@@ -172,7 +232,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     client.data.user = socketUser;
     this.scheduleTokenExpiryDisconnect(client, socketUser);
-    this.activeUsers.set(socketUser.userId, client.id);
+    this.trackUserSocket(socketUser.userId, client.id);
     if (socketUser.tenantId) {
       client.join(`tenant_${socketUser.tenantId}`);
     }
@@ -190,16 +250,15 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     const socketUser = client.data.user as SocketUser | undefined;
-    if (
-      socketUser?.userId &&
-      this.activeUsers.get(socketUser.userId) === client.id
-    ) {
-      this.activeUsers.delete(socketUser.userId);
+    if (socketUser?.userId) {
+      this.untrackUserSocket(socketUser.userId, client.id);
       return;
     }
 
-    for (const [userId, socketId] of this.activeUsers.entries()) {
-      if (socketId === client.id) this.activeUsers.delete(userId);
+    for (const [userId, socketIds] of this.activeUsers.entries()) {
+      if (socketIds.has(client.id)) {
+        this.untrackUserSocket(userId, client.id);
+      }
     }
   }
 
@@ -221,7 +280,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return { status: 'error', message: 'Invalid socket registration scope' };
     }
 
-    this.activeUsers.set(socketUser.userId, client.id);
+    this.trackUserSocket(socketUser.userId, client.id);
     if (socketUser.tenantId) {
       client.join(`tenant_${socketUser.tenantId}`);
     }
@@ -347,19 +406,40 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server.to(`tenant_${tenantId}`).emit(event, payload);
   }
 
+  // Broadcast table sync event to tenant
+  sendTableSyncEvent(tenantId: string) {
+    this.server.to(`tenant_${tenantId}`).emit('tableSync');
+  }
+
   // General method to send direct messages
   sendDirectMessage(targetUserId: string, payload: any) {
-    const socketId = this.activeUsers.get(targetUserId);
-    if (socketId) {
-      this.server.to(socketId).emit('newMessage', payload);
+    const socketIds = this.activeUsers.get(targetUserId);
+    if (socketIds) {
+      for (const socketId of socketIds) {
+        this.server.to(socketId).emit('newMessage', payload);
+      }
     }
   }
 
   sendUserEvent(targetUserId: string, event: string, payload: any) {
-    const socketId = this.activeUsers.get(targetUserId);
-    if (socketId) {
-      this.server.to(socketId).emit(event, payload);
+    const socketIds = this.activeUsers.get(targetUserId);
+    if (socketIds) {
+      for (const socketId of socketIds) {
+        this.server.to(socketId).emit(event, payload);
+      }
     }
+  }
+
+  revokeUserSession(targetUserId: string, reason: SessionRevokedReason) {
+    const socketIds = this.activeUsers.get(targetUserId);
+    if (!socketIds) return;
+
+    for (const socketId of Array.from(socketIds)) {
+      this.server.to(socketId).emit('sessionRevoked', { reason });
+      const socket = this.server.sockets?.sockets?.get(socketId);
+      socket?.disconnect(true);
+    }
+    this.activeUsers.delete(targetUserId);
   }
 
   // General method to send group message

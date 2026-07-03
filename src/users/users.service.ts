@@ -15,6 +15,7 @@ import {
   normalizePermissions,
   ROLE_DEFAULT_PERMISSIONS,
 } from '../common/permissions/permissions';
+import { randomBytes } from 'crypto';
 // @ts-ignore
 import * as bcrypt from 'bcrypt';
 
@@ -48,7 +49,7 @@ export class UsersService {
   }
 
   private generateTempPassword() {
-    return Math.random().toString(36).slice(-10);
+    return randomBytes(12).toString('base64url').slice(0, 16);
   }
 
   getPermissionCatalog() {
@@ -156,6 +157,7 @@ export class UsersService {
     delete updates.trustedDevices;
     delete updates.permissionOverrides;
     delete updates.permissionVersion;
+    delete updates.authVersion;
 
     if (updates.email !== undefined) {
       const email = this.normalizeEmail(updates.email);
@@ -305,9 +307,10 @@ export class UsersService {
       .exec();
     if (!user) throw new NotFoundException('User not found');
 
-    const tempPassword = Math.random().toString(36).slice(-8);
+    const tempPassword = this.generateTempPassword();
     user.passwordHash = await bcrypt.hash(tempPassword, 10);
     user.mustChangePassword = true;
+    user.authVersion = (user.authVersion || 1) + 1;
     user.trustedDevices = [];
     user.localOtpCode = undefined;
     user.localOtpExpires = undefined;
@@ -337,6 +340,7 @@ export class UsersService {
 
     user.passwordHash = await bcrypt.hash(newPassword, 10);
     user.mustChangePassword = false;
+    user.authVersion = (user.authVersion || 1) + 1;
     await user.save();
 
     return { message: 'Password changed successfully' };
@@ -349,6 +353,7 @@ export class UsersService {
     if (!user) throw new NotFoundException('User not found');
 
     user.status = UserStatus.LOCKED;
+    user.authVersion = (user.authVersion || 1) + 1;
     return user.save();
   }
 
@@ -371,6 +376,7 @@ export class UsersService {
     if (!user) throw new NotFoundException('User not found');
 
     user.status = UserStatus.DELETED;
+    user.authVersion = (user.authVersion || 1) + 1;
     return user.save();
   }
 
@@ -471,6 +477,7 @@ export class UsersService {
 
     // Clear all trusted devices — forces re-authentication
     user.trustedDevices = [];
+    user.authVersion = (user.authVersion || 1) + 1;
     user.markModified('trustedDevices');
     await user.save();
 

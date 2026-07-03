@@ -8,6 +8,7 @@ import { ChatGateway } from './chat.gateway';
 import { ChatRoom, ChatRoomSchema } from './schemas/chat-room.schema';
 import { Message, MessageSchema } from './schemas/message.schema';
 import { NotificationsService } from './notifications.service';
+import { User, UserSchema } from '../users/schemas/user.schema';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { NotificationsService } from './notifications.service';
     MongooseModule.forFeature([
       { name: ChatRoom.name, schema: ChatRoomSchema },
       { name: Message.name, schema: MessageSchema },
+      { name: User.name, schema: UserSchema },
     ]),
   ],
   controllers: [ChatController],
