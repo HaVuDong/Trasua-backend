@@ -115,6 +115,13 @@ export class OrdersController {
     return this.ordersService.getStaffWorkspace(user.tenantId);
   }
 
+  @Get('staff/history')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN, Role.MANAGER, Role.USER)
+  getStaffHistoryWorkspace(@CurrentUser() user: any) {
+    return this.ordersService.getStaffHistoryWorkspace(user.tenantId);
+  }
+
   @Get('kitchen/queue')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.ADMIN, Role.MANAGER, Role.KITCHEN)

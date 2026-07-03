@@ -1757,6 +1757,158 @@ export class OrdersService implements OnModuleInit {
     };
   }
 
+  async getStaffHistoryWorkspace(tenantId: string) {
+    const tenantObjectId = new Types.ObjectId(tenantId);
+    const sessions = await this.tableSessionModel
+      .find({
+        tenantId: tenantObjectId,
+        status: TableSessionStatus.CLOSED,
+      })
+      .sort({ lastActivityAt: -1, openedAt: -1 })
+      .limit(50)
+      .exec();
+
+    if (sessions.length === 0) {
+      return { sessions: [] };
+    }
+
+    const sessionIds = sessions.map((session) => session._id as Types.ObjectId);
+    const tableIds = Array.from(
+      new Set(sessions.map((session) => session.tableId.toString())),
+    )
+      .filter((id) => Types.ObjectId.isValid(id))
+      .map((id) => new Types.ObjectId(id));
+
+    const [tables, orders, requests] = await Promise.all([
+      this.tableModel
+        .find({ _id: { $in: tableIds }, tenantId: tenantObjectId })
+        .exec(),
+      this.orderModel
+        .find({
+          tenantId: tenantObjectId,
+          sessionId: { $in: sessionIds },
+        })
+        .populate('items.itemId', 'name category imageUrl sellingPrice status')
+        .sort({ createdAt: -1 })
+        .exec(),
+      this.customerRequestModel
+        .find({
+          tenantId: tenantObjectId,
+          sessionId: { $in: sessionIds },
+        })
+        .sort({ createdAt: -1 })
+        .exec(),
+    ]);
+
+    const tableById = new Map(
+      tables.map((table) => [table._id.toString(), table]),
+    );
+
+    const ordersBySession = new Map<string, OrderDocument[]>();
+    orders.forEach((order) => {
+      const key = (order.sessionId as Types.ObjectId)?.toString();
+      if (!key) return;
+      const existing = ordersBySession.get(key) || [];
+      existing.push(order);
+      ordersBySession.set(key, existing);
+    });
+
+    const requestsBySession = new Map<string, CustomerRequestDocument[]>();
+    requests.forEach((request) => {
+      const key = (request.sessionId as Types.ObjectId)?.toString();
+      if (!key) return;
+      const existing = requestsBySession.get(key) || [];
+      existing.push(request);
+      requestsBySession.set(key, existing);
+    });
+
+    return {
+      sessions: sessions
+        .map((tableSession) => {
+          const sessionId = (tableSession._id as Types.ObjectId).toString();
+          const table = tableById.get(tableSession.tableId.toString());
+          const sessionOrders = ordersBySession.get(sessionId) || [];
+          const sessionRequests = requestsBySession.get(sessionId) || [];
+          const publicOrders = sessionOrders.map((order) =>
+            this.toPublicSessionOrder(order),
+          );
+          const billItems = publicOrders.flatMap((order: any) =>
+            order.items
+              .filter(
+                (item: any) =>
+                  item.status !== OrderItemStatus.CANCELLED && !item.isFree,
+              )
+              .map((item: any) => ({
+                ...item,
+                orderId: order._id,
+                orderCode: order._id.slice(-6).toUpperCase(),
+              })),
+          );
+          const subtotal = billItems.reduce(
+            (sum, item) => sum + item.subtotal,
+            0,
+          );
+          const totalQuantity = billItems.reduce(
+            (sum, item) => sum + item.quantity,
+            0,
+          );
+          let totalPaidAmount = tableSession.totalPaidAmount || 0;
+          if (tableSession.paymentStatus === TableSessionPaymentStatus.PAID && totalPaidAmount === 0) {
+            totalPaidAmount = subtotal;
+          }
+          const finalAmount = Math.max(0, subtotal - totalPaidAmount);
+
+          return {
+            sessionId,
+            table: table
+              ? {
+                  _id: table._id.toString(),
+                  name: table.name,
+                  status: table.status,
+                }
+              : null,
+            customer:
+              tableSession.customerName || tableSession.customerPhone
+                ? {
+                    name: tableSession.customerName,
+                    phone: tableSession.customerPhone,
+                  }
+                : null,
+            status: tableSession.status,
+            paymentStatus: tableSession.paymentStatus,
+            paymentMethod: tableSession.paymentMethod,
+            openedAt: tableSession.openedAt,
+            lastActivityAt: tableSession.lastActivityAt,
+            orders: publicOrders,
+            requests: sessionRequests.map((request) => ({
+              _id: (request._id as Types.ObjectId).toString(),
+              type: request.type,
+              status: request.status,
+              paymentMethod: request.paymentMethod,
+              message: request.message,
+              customerName: request.customerName,
+              customerPhone: request.customerPhone,
+              tableName: request.tableNameSnapshot || table?.name,
+              createdAt: (request as any).createdAt,
+              updatedAt: (request as any).updatedAt,
+            })),
+            bill: {
+              orderCount: publicOrders.length,
+              itemCount: billItems.length,
+              totalQuantity,
+              subtotal,
+              finalAmount,
+              totalPaidAmount,
+              items: billItems,
+            },
+          };
+        })
+        .filter(
+          (session) => session.orders.length > 0 || session.requests.length > 0,
+        ),
+    };
+  }
+
   async getKitchenQueue(tenantId: string) {
     const orders = await this.orderModel
       .find({
