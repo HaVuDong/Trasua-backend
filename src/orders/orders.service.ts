@@ -736,9 +736,9 @@ export class OrdersService implements OnModuleInit {
     const computedSignature = this.createPayosSignature(data, checksumKey);
 
     if (signature !== computedSignature) {
-      const payos = new PayOS(clientId, apiKey, checksumKey);
+      const payos = new PayOS({ clientId, apiKey, checksumKey });
       try {
-        data = payos.verifyPaymentWebhookData(body as any) as any;
+        data = (await payos.webhooks.verify(body as any)) as any;
       } catch (error) {
         throw new BadRequestException('Invalid payOS webhook signature');
       }
