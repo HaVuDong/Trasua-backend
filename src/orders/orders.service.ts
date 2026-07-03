@@ -6,6 +6,7 @@ import {
   Logger,
   Optional,
 } from '@nestjs/common';
+import { PayOS } from '@payos/node';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { createHmac } from 'crypto';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
@@ -686,17 +687,19 @@ export class OrdersService {
   }
 
   async handlePayosWebhook(body: Record<string, unknown>) {
-    const data = this.asRecord(body?.data);
-    const receivedSignature =
-      typeof body?.signature === 'string' ? body.signature : '';
-    const checksumKey = process.env.PAYOS_CHECKSUM_KEY;
+    const checksumKey = process.env.PAYOS_CHECKSUM_KEY || '';
+    const clientId = process.env.PAYOS_CLIENT_ID || '';
+    const apiKey = process.env.PAYOS_API_KEY || '';
 
-    if (!checksumKey || !receivedSignature) {
-      throw new BadRequestException('Invalid payOS webhook signature');
+    if (!checksumKey || !clientId || !apiKey) {
+      throw new BadRequestException('payOS is not configured');
     }
 
-    const expectedSignature = this.createPayosSignature(data, checksumKey);
-    if (expectedSignature !== receivedSignature) {
+    const payos = new PayOS({ clientId, apiKey, checksumKey });
+    let data;
+    try {
+      data = await payos.webhooks.verify(body as any); 
+    } catch (error) {
       throw new BadRequestException('Invalid payOS webhook signature');
     }
 
@@ -715,9 +718,10 @@ export class OrdersService {
     payment.webhookPayload = body;
     const webhookCode = String(data.code || body.code || '');
     const isPaid = body.success === true || webhookCode === '00';
+    const payloadData = data as any;
     const isCancelled =
-      data.cancel === true ||
-      String(data.status || '').toUpperCase() === 'CANCELLED';
+      payloadData.cancel === true ||
+      String(payloadData.status || '').toUpperCase() === 'CANCELLED';
 
     const wasAlreadyPaid = payment.status === CustomerPaymentStatus.PAID;
     if (isPaid) {

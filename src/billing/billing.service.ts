@@ -10,6 +10,7 @@ import {
 import { getSaasPlan } from './saas-plans';
 import { SaasPayment, SaasPaymentDocument } from './schemas/saas-payment.schema';
 import { AuditLogService } from '../common/services/audit-log.service';
+import { PayOS } from '@payos/node';
 
 @Injectable()
 export class BillingService {
@@ -102,7 +103,7 @@ export class BillingService {
     // Auto-sync any PENDING payments
     for (let i = 0; i < latestPayments.length; i++) {
       if (latestPayments[i].status === CustomerPaymentStatus.PENDING) {
-        latestPayments[i] = await this.syncPayosPayment(latestPayments[i] as any);
+        latestPayments[i] = (await this.syncPayosPayment(latestPayments[i] as any)) as any;
       }
     }
 
@@ -245,16 +246,19 @@ export class BillingService {
   }
 
   async handlePayosWebhookIfSaas(body: Record<string, unknown>) {
-    const data = this.asRecord(body?.data);
-    const receivedSignature = typeof body?.signature === 'string' ? body.signature : '';
-    const checksumKey = process.env.PAYOS_CHECKSUM_KEY;
+    const checksumKey = process.env.PAYOS_CHECKSUM_KEY || '';
+    const clientId = process.env.PAYOS_CLIENT_ID || '';
+    const apiKey = process.env.PAYOS_API_KEY || '';
 
-    if (!checksumKey || !receivedSignature) {
-      throw new BadRequestException('Invalid payOS webhook signature');
+    if (!checksumKey || !clientId || !apiKey) {
+      throw new BadRequestException('payOS is not configured');
     }
 
-    const expectedSignature = this.createPayosSignature(data, checksumKey);
-    if (expectedSignature !== receivedSignature) {
+    const payos = new PayOS({ clientId, apiKey, checksumKey });
+    let data;
+    try {
+      data = await payos.webhooks.verify(body as any);
+    } catch (error) {
       throw new BadRequestException('Invalid payOS webhook signature');
     }
 
@@ -271,7 +275,8 @@ export class BillingService {
     payment.webhookPayload = body;
     const webhookCode = String(data.code || body.code || '');
     const isPaid = body.success === true || webhookCode === '00';
-    const isCancelled = data.cancel === true || String(data.status || '').toUpperCase() === 'CANCELLED';
+    const payloadData = data as any;
+    const isCancelled = payloadData.cancel === true || String(payloadData.status || '').toUpperCase() === 'CANCELLED';
 
     if (isPaid) {
       const wasAlreadyPaid = payment.status === CustomerPaymentStatus.PAID;
