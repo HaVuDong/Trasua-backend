@@ -1289,6 +1289,7 @@ export class OrdersService implements OnModuleInit {
     discount = 0,
     discountType: string = 'FLAT',
     actorId?: string,
+    userRole?: string,
     options: {
       skipCashMovement?: boolean;
       paymentMethod?: PaymentMethod;
@@ -1304,6 +1305,7 @@ export class OrdersService implements OnModuleInit {
           discount,
           discountType,
           actorId,
+          userRole,
           options,
           session,
         ),
@@ -1325,6 +1327,7 @@ export class OrdersService implements OnModuleInit {
     discount: number,
     discountType: string,
     actorId: string | undefined,
+    userRole: string | undefined,
     options: {
       skipCashMovement?: boolean;
       paymentMethod?: PaymentMethod;
@@ -1395,8 +1398,10 @@ export class OrdersService implements OnModuleInit {
       const cashierShift = await this.cashierService.requireOpenShift(
         tenantId,
         session,
+        userRole,
       );
-      await this.cashierService.recordMovement({
+      if (cashierShift) {
+        await this.cashierService.recordMovement({
         tenantId,
         shiftId: (cashierShift._id as Types.ObjectId).toString(),
         type: CashMovementType.MANUAL_CHECKOUT,
@@ -1408,6 +1413,7 @@ export class OrdersService implements OnModuleInit {
         createdBy: actorId,
         session,
       });
+      }
     }
 
     const table = await this.tableModel
@@ -1468,6 +1474,7 @@ export class OrdersService implements OnModuleInit {
     tenantId: string,
     sessionId: string,
     paidBy: string,
+    userRole?: string,
   ) {
     const tenantObjectId = new Types.ObjectId(tenantId);
     const sessionObjectId = this.toObjectId(sessionId, 'Invalid table session');
@@ -1488,7 +1495,7 @@ export class OrdersService implements OnModuleInit {
         }
 
         const cashierShift = this.cashierService
-          ? await this.cashierService.requireOpenShift(tenantId, session)
+          ? await this.cashierService.requireOpenShift(tenantId, session, userRole)
           : undefined;
 
         const orders = await this.orderModel
@@ -2017,6 +2024,7 @@ export class OrdersService implements OnModuleInit {
     paidBy: string,
     discount = 0,
     discountType: string = 'FLAT',
+    userRole?: string,
   ) {
     const tenantObjectId = new Types.ObjectId(tenantId);
     const sessionObjectId = this.toObjectId(sessionId, 'Invalid table session');
@@ -2037,7 +2045,7 @@ export class OrdersService implements OnModuleInit {
         }
 
         const cashierShift = this.cashierService
-          ? await this.cashierService.requireOpenShift(tenantId, session)
+          ? await this.cashierService.requireOpenShift(tenantId, session, userRole)
           : undefined;
 
         const orders = await this.orderModel
@@ -2071,6 +2079,7 @@ export class OrdersService implements OnModuleInit {
             discount,
             discountType,
             paidBy,
+            userRole,
             { skipCashMovement: true },
             session,
           );

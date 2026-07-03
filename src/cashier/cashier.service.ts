@@ -111,15 +111,18 @@ export class CashierService {
   async requireOpenShift(
     tenantId: string,
     session?: ClientSession,
-  ): Promise<CashierShiftDocument> {
+    userRole?: string,
+  ): Promise<CashierShiftDocument | null> {
     const query = this.shiftModel.findOne({
       tenantId: this.toObjectId(tenantId, 'Tenant khong hop le'),
       status: CashierShiftStatus.OPEN,
     });
     this.applySession(query, session);
     const shift = await query.exec();
-    if (!shift)
+    if (!shift) {
+      if (userRole === 'ADMIN') return null;
       throw new BadRequestException('Can mo ca quay truoc khi thanh toan');
+    }
     return shift;
   }
 

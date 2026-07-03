@@ -159,6 +159,7 @@ export class OrdersController {
       user.userId,
       discount,
       discountType,
+      user.role,
     );
   }
 
@@ -173,6 +174,7 @@ export class OrdersController {
       user.tenantId,
       sessionId,
       user.userId,
+      user.role,
     );
   }
 
@@ -347,6 +349,7 @@ export class OrdersController {
       discount,
       discountType,
       user.userId,
+      user.role,
     );
   }
 }
