@@ -125,12 +125,15 @@ export class InventoryController {
     FileInterceptor('file', { limits: { fileSize: 2 * 1024 * 1024 } }),
   )
   importItemsFromExcel(@CurrentUser() user: any, @UploadedFile() file: any) {
+    console.log('UPLOADED FILE:', file);
     return this.inventoryService.importItemsFromExcel(
       user.tenantId,
       file,
       user.userId,
     );
   }
+
+
 
   @Get('items/:id')
   @Roles(Role.ADMIN, Role.MANAGER)

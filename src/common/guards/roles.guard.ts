@@ -127,8 +127,12 @@ export class RolesGuard implements CanActivate {
     }
 
     const query: Record<string, unknown> = { _id: user.userId };
-    if (user.tenantId && Types.ObjectId.isValid(user.tenantId)) {
-      query.tenantId = new Types.ObjectId(user.tenantId);
+    if (user.tenantId) {
+      if (Types.ObjectId.isValid(user.tenantId)) {
+        query.tenantId = { $in: [new Types.ObjectId(user.tenantId), user.tenantId] };
+      } else {
+        query.tenantId = user.tenantId;
+      }
     }
 
     const userDoc = (await this.userModel
@@ -140,7 +144,8 @@ export class RolesGuard implements CanActivate {
       .exec()) as LeanPermissionUser | null;
 
     if (!userDoc) {
-      throw new HttpException('User not found', HttpStatus.UNAUTHORIZED);
+      console.log('RolesGuard: User not found for query:', JSON.stringify(query));
+      throw new HttpException('RolesGuard: User not found', HttpStatus.UNAUTHORIZED);
     }
     if ((userDoc.status || UserStatus.ACTIVE) !== UserStatus.ACTIVE) {
       throw new HttpException(

@@ -3147,8 +3147,9 @@ export class OrdersService implements OnModuleInit {
           };
         });
 
+      const leanItem = typeof (item as any).toObject === 'function' ? (item as any).toObject() : item;
       return {
-        ...item,
+        ...leanItem,
         costSnapshot: {
           totalCost,
           ingredients,

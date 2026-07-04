@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Types, Schema as MongooseSchema } from 'mongoose';
 import {
   integerVndValidator,
   INTEGER_VND_MESSAGE,
@@ -71,7 +71,7 @@ export class PermissionOverrides {
 @Schema({ timestamps: true })
 export class User {
   // null for SYSTEM_OWNER
-  @Prop({ type: Types.ObjectId, ref: 'Tenant', required: false })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Tenant', required: false })
   tenantId?: Types.ObjectId;
 
   @Prop({ required: true })

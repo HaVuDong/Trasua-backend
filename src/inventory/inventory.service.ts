@@ -131,6 +131,7 @@ const IMPORT_HEADER_ALIASES: Record<string, InventoryImportField> = {
   soluongton: 'stock',
   soluongnhap: 'stock',
   nhapthem: 'stock',
+  soluongnhaptonbandau: 'stock',
   minstock: 'minStockLevel',
   minstocklevel: 'minStockLevel',
   min: 'minStockLevel',

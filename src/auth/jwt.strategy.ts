@@ -38,16 +38,19 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       .exec();
 
     if (!user) {
-      throw new UnauthorizedException('User not found');
+      console.log('JwtStrategy: User not found', payload.sub);
+      throw new UnauthorizedException('JwtStrategy: User not found');
     }
 
     if ((user.status || UserStatus.ACTIVE) !== UserStatus.ACTIVE) {
+      console.log('JwtStrategy: Account not active', user.status);
       throw new UnauthorizedException('Account is not active');
     }
 
     const tokenAuthVersion = payload.authVersion || 1;
     const currentAuthVersion = user.authVersion || 1;
     if (tokenAuthVersion !== currentAuthVersion) {
+      console.log('JwtStrategy: Session revoked', tokenAuthVersion, currentAuthVersion);
       throw new UnauthorizedException('Session has been revoked');
     }
 
