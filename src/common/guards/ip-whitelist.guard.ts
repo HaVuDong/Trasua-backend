@@ -39,7 +39,7 @@ export class IpWhitelistGuard implements CanActivate {
 
     const isAllowed = dbUser.ipWhitelist.some(allowedIp => {
       // Direct match
-      if (allowedIp === normalizedIp || allowedIp === '127.0.0.1' || allowedIp === '::1') {
+      if (allowedIp === normalizedIp) {
         return true;
       }
       

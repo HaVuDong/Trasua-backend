@@ -34,7 +34,16 @@ async function bootstrap() {
   const { DocumentBuilder, SwaggerModule } = await import('@nestjs/swagger');
   const { default: helmet } = await import('helmet');
 
+  const { ValidationPipe } = await import('@nestjs/common');
+
   const app = await NestFactory.create(AppModule, { rawBody: true });
+
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      transform: true,
+    }),
+  );
 
   app.use(
     helmet({

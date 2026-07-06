@@ -22,10 +22,11 @@ export class AuditLogService {
     return this.log(tenantId, undefined, action, details, ipAddress);
   }
 
-  async getLogs(tenantId: string): Promise<AuditLog[]> {
+  async getLogs(tenantId: string, limit = 500): Promise<AuditLog[]> {
     return this.logModel.find({ tenantId: new Types.ObjectId(tenantId) })
       .populate('userId', 'name email role')
       .sort({ createdAt: -1 })
+      .limit(Math.max(1, Math.min(1000, limit)))
       .exec();
   }
 }

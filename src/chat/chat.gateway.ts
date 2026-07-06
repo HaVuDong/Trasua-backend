@@ -154,11 +154,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
 
-    const timer = setTimeout(() => {
-      this.logger.debug(`Disconnecting expired socket token: ${client.id}`);
-      client.disconnect(true);
-    }, expiresInMs);
-    client.data.expiryTimer = timer;
+    const MAX_TIMEOUT = 2147483647; // Tối đa ~24.8 ngày trong Node.js
+    if (expiresInMs > MAX_TIMEOUT) {
+      // Hẹn giờ lại khi gần đến hạn để tránh tràn số (overflow)
+      const timer = setTimeout(() => {
+        this.scheduleTokenExpiryDisconnect(client, socketUser);
+      }, MAX_TIMEOUT);
+      client.data.expiryTimer = timer;
+    } else {
+      const timer = setTimeout(() => {
+        this.logger.debug(`Disconnecting expired socket token: ${client.id}`);
+        client.disconnect(true);
+      }, expiresInMs);
+      client.data.expiryTimer = timer;
+    }
   }
 
   private getSocketUser(client: Socket): SocketUser | null {
@@ -331,15 +340,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       readBy: [new Types.ObjectId(socketUser.userId)],
     }).save();
 
-    if (room.isGroup) {
-      this.server.to(this.getChatRoomName(roomId)).emit('newMessage', savedMsg);
-    } else {
-      const recipient = room.members.find(
-        (member) => member.toString() !== socketUser.userId,
-      );
-      if (recipient) this.sendDirectMessage(recipient.toString(), savedMsg);
-      client.emit('newMessage', savedMsg);
-    }
+    // Gửi sự kiện newMessage đến tất cả thành viên (đảm bảo nhận được kể cả khi chưa mở phòng chat)
+    room.members.forEach((member) => {
+      // Bỏ qua current client socket để tránh lặp (vì client đã nhận response 'success'),
+      // nhưng sendDirectMessage vẫn sẽ gửi tới các thiết bị KHÁC của client này.
+      const targetUserId = member.toString();
+      const socketIds = this.activeUsers.get(targetUserId);
+      if (socketIds) {
+        for (const socketId of socketIds) {
+          if (socketId !== client.id) {
+            this.server.to(socketId).emit('newMessage', savedMsg);
+          }
+        }
+      }
+    });
 
     return { status: 'success', message: savedMsg };
   }

@@ -6,6 +6,7 @@ import {
   Logger,
   Optional,
   OnModuleInit,
+  OnModuleDestroy,
 } from '@nestjs/common';
 import { PayOS } from '@payos/node';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
@@ -126,7 +127,7 @@ type IngredientRequirement = {
 };
 
 @Injectable()
-export class OrdersService implements OnModuleInit {
+export class OrdersService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OrdersService.name);
 
   constructor(
@@ -152,10 +153,19 @@ export class OrdersService implements OnModuleInit {
     @Optional() private cashierService?: CashierService,
   ) {}
 
+  private cleanupTimer?: ReturnType<typeof setInterval>;
+
   onModuleInit() {
-    setInterval(() => {
+    this.cleanupTimer = setInterval(() => {
       this.autoCleanupEmptySessions().catch(err => this.logger.error('Auto cleanup empty sessions failed', err));
     }, 10 * 60 * 1000);
+  }
+
+  onModuleDestroy() {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = undefined;
+    }
   }
 
   private async autoCleanupEmptySessions() {
@@ -824,6 +834,22 @@ export class OrdersService implements OnModuleInit {
           bill: savedPayment.billSnapshot,
         },
       );
+
+      // Tự động chốt đơn (checkout) để trừ kho khi khách đã thanh toán thành công qua mã QR
+      try {
+        await this.manualCheckoutTableSession(
+          savedPayment.tenantId.toString(),
+          savedPayment.sessionId.toString(),
+          savedPayment.customerName || 'Khách hàng (PayOS)',
+          0,
+          'FLAT',
+        );
+      } catch (err) {
+        this.logger.error(
+          `Auto checkout failed for session ${savedPayment.sessionId.toString()} after PayOS payment`,
+          err,
+        );
+      }
     }
 
     return { success: true };

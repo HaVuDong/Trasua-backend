@@ -449,6 +449,12 @@ export class AuthService {
     currentPassword: string,
     newPassword: string,
   ): Promise<any> {
+    if (!newPassword || newPassword.length < 8) {
+      throw new UnauthorizedException(
+        'Mật khẩu mới phải có ít nhất 8 ký tự',
+      );
+    }
+
     const userDoc = await this.userModel.findById(userId).exec();
     if (!userDoc) throw new UnauthorizedException('User not found');
 
@@ -494,7 +500,7 @@ export class AuthService {
 
     const otp = this.createOtpCode();
     user.forgotPasswordOtpCode = await bcrypt.hash(otp, 10);
-    user.forgotPasswordOtpExpires = new Date(Date.now() + 60 * 1000);
+    user.forgotPasswordOtpExpires = new Date(Date.now() + 5 * 60 * 1000);
     user.forgotPasswordOtpAttempts = 0;
     // Do not reset lock phase here so that the next penalty can be applied if they fail again
     await user.save();
@@ -583,6 +589,12 @@ export class AuthService {
   }
 
   async resetPasswordWithToken(token: string, newPassword: string) {
+    if (!newPassword || newPassword.length < 8) {
+      throw new UnauthorizedException(
+        'Mật khẩu mới phải có ít nhất 8 ký tự',
+      );
+    }
+
     let decoded;
     try {
       decoded = this.jwtService.verify(token);

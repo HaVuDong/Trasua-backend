@@ -4,6 +4,7 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
   Optional,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -57,6 +58,8 @@ type LeanPermissionUser = {
 
 @Injectable()
 export class RolesGuard implements CanActivate {
+  private readonly logger = new Logger(RolesGuard.name);
+
   constructor(
     private reflector: Reflector,
     @Optional() @InjectModel(User.name) private userModel?: Model<UserDocument>,
@@ -144,7 +147,7 @@ export class RolesGuard implements CanActivate {
       .exec()) as LeanPermissionUser | null;
 
     if (!userDoc) {
-      console.log('RolesGuard: User not found for query:', JSON.stringify(query));
+      this.logger.warn(`User not found for query: ${JSON.stringify(query)}`);
       throw new HttpException('RolesGuard: User not found', HttpStatus.UNAUTHORIZED);
     }
     if ((userDoc.status || UserStatus.ACTIVE) !== UserStatus.ACTIVE) {

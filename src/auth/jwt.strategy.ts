@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
@@ -17,6 +17,8 @@ export interface JwtPayload {
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
+  private readonly logger = new Logger(JwtStrategy.name);
+
   constructor(
     private configService: ConfigService,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
@@ -38,19 +40,19 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       .exec();
 
     if (!user) {
-      console.log('JwtStrategy: User not found', payload.sub);
+      this.logger.warn(`User not found: ${payload.sub}`);
       throw new UnauthorizedException('JwtStrategy: User not found');
     }
 
     if ((user.status || UserStatus.ACTIVE) !== UserStatus.ACTIVE) {
-      console.log('JwtStrategy: Account not active', user.status);
+      this.logger.warn(`Account not active: ${user.status}`);
       throw new UnauthorizedException('Account is not active');
     }
 
     const tokenAuthVersion = payload.authVersion || 1;
     const currentAuthVersion = user.authVersion || 1;
     if (tokenAuthVersion !== currentAuthVersion) {
-      console.log('JwtStrategy: Session revoked', tokenAuthVersion, currentAuthVersion);
+      this.logger.warn(`Session revoked: token=${tokenAuthVersion} current=${currentAuthVersion}`);
       throw new UnauthorizedException('Session has been revoked');
     }
 

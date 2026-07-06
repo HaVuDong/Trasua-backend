@@ -122,13 +122,20 @@ export class ReportsService {
       .slice(0, 5)
       .map(([itemId, data]) => ({ itemId, ...data }));
 
-    // Populate item names from MenuItem because order items reference menu_items.
-    for (const item of top5Items) {
-      const menuItem = await this.menuItemModel
-        .findById(item.itemId)
+    // Populate item names from MenuItem in a single batch query instead of N+1.
+    const top5MenuItemIds = top5Items
+      .map((item) => item.itemId)
+      .filter((id) => Types.ObjectId.isValid(id));
+    if (top5MenuItemIds.length > 0) {
+      const menuItems = await this.menuItemModel
+        .find({ _id: { $in: top5MenuItemIds.map((id) => new Types.ObjectId(id)) } })
         .select('name')
         .exec();
-      if (menuItem) item.name = menuItem.name;
+      const menuMap = new Map(menuItems.map((m: any) => [m._id.toString(), m.name]));
+      for (const item of top5Items) {
+        const name = menuMap.get(item.itemId);
+        if (name) item.name = name;
+      }
     }
 
     // Stock alerts
@@ -287,20 +294,23 @@ export class ReportsService {
 
     // Populate item names
     const populateItems = async (items: [string, any][]) => {
-      const result = [];
-      for (const [itemId, data] of items) {
-        const menuItem = await this.menuItemModel
-          .findById(itemId)
-          .select('name category')
-          .exec();
-        result.push({
+      const ids = items.map(([itemId]) => itemId).filter((id) => Types.ObjectId.isValid(id));
+      const menuItems = ids.length
+        ? await this.menuItemModel
+            .find({ _id: { $in: ids.map((id) => new Types.ObjectId(id)) } })
+            .select('name category')
+            .exec()
+        : [];
+      const menuMap = new Map(menuItems.map((m: any) => [m._id.toString(), m]));
+      return items.map(([itemId, data]) => {
+        const menuItem = menuMap.get(itemId);
+        return {
           itemId,
           name: menuItem?.name || 'Unknown',
           category: menuItem?.category || 'Unknown',
           ...data,
-        });
-      }
-      return result;
+        };
+      });
     };
 
     return {
