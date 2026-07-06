@@ -10,7 +10,7 @@ import {
 } from '@nestjs/common';
 import { PayOS } from '@payos/node';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
-import { createHmac, randomUUID } from 'crypto';
+import { createHmac } from 'crypto';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
 import {
   Order,
@@ -189,7 +189,6 @@ export class OrdersService implements OnModuleInit, OnModuleDestroy {
         const table = await this.tableModel.findById(session.tableId).exec();
         if (table) {
           table.status = TableStatus.EMPTY;
-          table.qrCodeToken = randomUUID();
           await table.save();
         }
 
@@ -1060,7 +1059,6 @@ export class OrdersService implements OnModuleInit, OnModuleDestroy {
 
       if (otherOrders === 0) {
         table.status = TableStatus.EMPTY;
-        table.qrCodeToken = randomUUID();
         await table.save();
         await this.closeOpenTableSessions(
           tenantId,
@@ -1461,7 +1459,6 @@ export class OrdersService implements OnModuleInit, OnModuleDestroy {
 
       if (otherOrders === 0) {
         table.status = TableStatus.EMPTY;
-        table.qrCodeToken = randomUUID();
         await table.save({ session });
         await this.closeOpenTableSessions(
           new Types.ObjectId(tenantId),
@@ -1492,7 +1489,6 @@ export class OrdersService implements OnModuleInit, OnModuleDestroy {
 
     if (table) {
       table.status = TableStatus.EMPTY;
-      table.qrCodeToken = randomUUID();
       await table.save();
     }
 
